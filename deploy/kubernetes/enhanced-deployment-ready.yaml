@@ -1,0 +1,680 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-multi-tenant-proxy
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/instance: prometheus-multi-tenant-proxy
+    app.kubernetes.io/name: prometheus-multi-tenant-proxy
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: proxy
+    app.kubernetes.io/part-of: prometheus-multi-tenant-system
+spec:
+  replicas: 2  # Production-ready with 3 replicas for HA
+  revisionHistoryLimit: 5  # Keep more history for rollbacks
+  selector:
+    matchLabels:
+      app: prometheus-multi-tenant-proxy
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0  # Ensure zero downtime
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: prometheus-multi-tenant-proxy
+        app.kubernetes.io/instance: prometheus-multi-tenant-proxy
+        app.kubernetes.io/name: prometheus-multi-tenant-proxy
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9113"
+        prometheus.io/path: "/metrics"
+        # Force pod restart when configmap changes
+        configmap/prometheus-multi-tenant-proxy-config: "v1.0.0"
+        configmap/prometheus-multi-tenant-proxy-nginx-config: "v1.0.0"
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values:
+                      - linux
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - prometheus-multi-tenant-proxy
+                topologyKey: kubernetes.io/hostname
+              weight: 100
+      containers:
+        # Nginx proxy with rate limiting
+        - name: nginx-proxy
+          image: nginx:1.26.1-alpine  # Latest stable alpine version
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /etc/nginx
+              name: nginx-config
+              readOnly: true
+            - mountPath: /var/cache/nginx
+              name: nginx-cache
+            - mountPath: /var/run
+              name: nginx-run
+          resources:
+            requests:
+              cpu: 100m      # Increased for production
+              memory: 128Mi  # Increased for production
+            limits:
+              cpu: 500m      # Higher limit for burst traffic
+              memory: 256Mi  # Higher limit for rate limiting state
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 101  # nginx user
+            runAsGroup: 101
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          
+        # Main prometheus multi-tenant proxy
+        - name: prometheus-proxy
+          image: bnkarthik6/prometheus-multi-tenant-proxy:latest
+          imagePullPolicy: Always
+          args:
+            - "--log-level=info"
+            - "--port=8080"
+            - "--config=/etc/prometheus-proxy/config.yaml"
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.uid
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: GOMAXPROCS
+              value: "2"  # Optimize Go runtime for container limits
+          ports:
+            - containerPort: 8080
+              name: proxy-http
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus-proxy
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 200m     # Increased for production workload
+              memory: 256Mi # Increased for caching and processing
+            limits:
+              cpu: 1000m    # Full CPU core for high throughput
+              memory: 1Gi   # Higher memory for large query results
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: proxy-http
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: proxy-http
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            capabilities:
+              drop:
+                - ALL
+          
+        # Nginx metrics exporter
+        - name: nginx-exporter
+          image: nginx/nginx-prometheus-exporter:1.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - '--nginx.scrape-uri=http://localhost:8081/basic_status'
+            - '--web.listen-address=:9113'
+            - '--web.telemetry-path=/metrics'
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.uid
+          ports:
+            - containerPort: 9113
+              name: metrics
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 20m      # Increased for production
+              memory: 64Mi  # Increased for stability
+            limits:
+              cpu: 100m     # Higher limit for metrics processing
+              memory: 128Mi # Higher limit for metrics storage
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            capabilities:
+              drop:
+                - ALL
+      
+      # Production DNS configuration
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
+          - name: edns0
+      
+      restartPolicy: Always
+      securityContext:
+        fsGroup: 65534
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccount: prometheus-multi-tenant-proxy
+      serviceAccountName: prometheus-multi-tenant-proxy
+      terminationGracePeriodSeconds: 60  # Increased for graceful shutdown
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-multi-tenant-proxy-config
+        - name: nginx-config
+          configMap:
+            name: prometheus-multi-tenant-proxy-nginx-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+            defaultMode: 0644
+        # Writable volumes for nginx
+        - name: nginx-cache
+          emptyDir:
+            sizeLimit: 100Mi  # Limit cache size
+        - name: nginx-run
+          emptyDir:
+            sizeLimit: 10Mi   # Limit run directory size
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi  # Limit temp directory size
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-multi-tenant-proxy-nginx-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/instance: prometheus-multi-tenant-proxy
+    app.kubernetes.io/name: prometheus-multi-tenant-proxy
+data:
+  nginx.conf: |
+    # Basic nginx configuration for multi-tenant proxy
+    worker_processes auto;
+    error_log /dev/stderr warn;
+    pid /var/run/nginx.pid;
+    
+    events {
+      worker_connections 1024;
+      use epoll;
+      multi_accept on;
+    }
+    
+    http {
+      # Define basic MIME types inline (instead of including external file)
+      types {
+        text/html                             html htm shtml;
+        text/css                              css;
+        text/xml                              xml;
+        image/gif                             gif;
+        image/jpeg                            jpeg jpg;
+        application/javascript                js;
+        application/atom+xml                  atom;
+        application/rss+xml                   rss;
+        application/json                      json;
+        text/plain                            txt;
+        image/png                             png;
+        image/x-icon                          ico;
+        image/svg+xml                         svg svgz;
+        application/octet-stream              bin exe dll;
+      }
+      default_type application/octet-stream;
+      
+      # Logging format
+      log_format main
+        'remote_addr:$remote_addr\t'
+        'time_local:$time_local\t'
+        'method:$request_method\t'
+        'uri:$request_uri\t'
+        'host:$host\t'
+        'status:$status\t'
+        'bytes_sent:$body_bytes_sent\t'
+        'referer:$http_referer\t'
+        'useragent:$http_user_agent\t'
+        'forwardedfor:$http_x_forwarded_for\t'
+        'request_time:$request_time\t'
+        'tenant_namespace:$http_x_tenant_namespace';
+
+      access_log /dev/stdout main;
+      
+      # Basic settings
+      sendfile on;
+      tcp_nopush on;
+      tcp_nodelay on;
+      keepalive_timeout 65;
+      types_hash_max_size 2048;
+      client_max_body_size 1m;
+      
+      # ====================================================================
+      # RATE LIMITING CONFIGURATION
+      # ====================================================================
+      
+      # Rate limiting zones - These define the "buckets" for rate limiting
+      # Syntax: limit_req_zone $variable zone=name:size rate=rate;
+      # 
+      # 1. TENANT-BASED RATE LIMITING
+      # Uses X-Tenant-Namespace header to limit requests per tenant
+      # - zone=tenant_limit: Name of the rate limiting zone
+      # - 10m: Memory allocated for storing tenant state (can track ~160k tenants)
+      # - rate=5r/s: Allow maximum 5 requests per second per tenant
+      limit_req_zone $http_x_tenant_namespace zone=tenant_limit:10m rate=5r/s;
+      
+      # 2. URI-BASED RATE LIMITING  
+      # Limits requests to specific endpoints/queries
+      # - Prevents abuse of expensive queries
+      # - rate=3r/s: Allow maximum 3 requests per second per unique URI
+      limit_req_zone $request_uri zone=uri_limit:10m rate=3r/s;
+      
+      # 3. IP-BASED RATE LIMITING
+      # Global rate limiting per client IP address
+      # - Fallback protection when tenant header is missing
+      # - rate=10r/s: Allow maximum 10 requests per second per IP
+      limit_req_zone $remote_addr zone=ip_limit:10m rate=10r/s;
+      
+      # ====================================================================
+      # CONNECTION LIMITING CONFIGURATION  
+      # ====================================================================
+      
+      # Connection limiting zones - Limit concurrent connections
+      # 
+      # 1. TENANT-BASED CONNECTION LIMITING
+      # Limits concurrent connections per tenant namespace
+      limit_conn_zone $http_x_tenant_namespace zone=tenant_conn:10m;
+      
+      # 2. IP-BASED CONNECTION LIMITING
+      # Limits concurrent connections per client IP
+      limit_conn_zone $remote_addr zone=ip_conn:10m;
+      
+      # ====================================================================
+      # RATE LIMITING RESPONSE CONFIGURATION
+      # ====================================================================
+      
+      # HTTP status code returned when rate limit is exceeded
+      limit_req_status 429;    # Too Many Requests
+      limit_conn_status 429;   # Too Many Requests
+      
+      # Dynamic Retry-After header based on HTTP status
+      # Tells clients how long to wait before retrying
+      map $status $retry_after {
+        default '';
+        429 '30';  # Tell clients to retry after 30 seconds when rate limited
+      }
+      
+      upstream prometheus_proxy {
+        server localhost:8080 max_fails=3 fail_timeout=30s;
+        keepalive 8;
+      }
+      
+      server {
+        listen 8081;
+        server_name _;
+        
+        # Security headers
+        add_header X-Frame-Options DENY always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        
+        # Health check endpoint
+        location /health {
+          access_log off;
+          return 200 "healthy\n";
+          add_header Content-Type text/plain;
+        }
+        
+        # Nginx status for monitoring
+        location = /basic_status {
+          stub_status;
+          access_log off;
+          allow 127.0.0.1;
+          allow ::1;
+          deny all;
+        }
+        
+        # Prometheus API endpoints with rate limiting
+        # Matches: /api/v1/query and /api/v1/query_range (most resource-intensive endpoints)
+        location ~* ^/api/v1/(query|query_range) {
+          # ====================================================================
+          # RATE LIMITING APPLICATION - QUERY ENDPOINTS
+          # ====================================================================
+          
+          # Apply multiple rate limiting layers for maximum protection
+          # Syntax: limit_req zone=name burst=number [nodelay];
+          # 
+          # 1. TENANT RATE LIMITING: 5 requests/second + burst of 3
+          # - Base rate: 5r/s (from tenant_limit zone)
+          # - burst=3: Allow up to 3 additional requests in burst
+          # - nodelay: Don't delay burst requests, either allow or reject immediately
+          # - Total capacity: Up to 8 requests can be processed quickly, then limited to 5r/s
+          limit_req zone=tenant_limit burst=3 nodelay;
+          
+          # 2. URI RATE LIMITING: 3 requests/second + burst of 2  
+          # - Prevents repeated expensive queries to same endpoint
+          # - Lower rate than tenant limit for additional protection
+          limit_req zone=uri_limit burst=2 nodelay;
+          
+          # 3. IP RATE LIMITING: 10 requests/second + burst of 5
+          # - Global IP protection (higher limit as fallback)
+          # - Protects against clients without tenant headers
+          limit_req zone=ip_limit burst=5 nodelay;
+          
+          # ====================================================================
+          # CONNECTION LIMITING APPLICATION - QUERY ENDPOINTS
+          # ====================================================================
+          
+          # Limit concurrent connections to prevent resource exhaustion
+          # 
+          # 1. TENANT CONNECTION LIMITING: Max 5 concurrent connections per tenant
+          # - Prevents any single tenant from monopolizing connections
+          limit_conn tenant_conn 5;
+          
+          # 2. IP CONNECTION LIMITING: Max 10 concurrent connections per IP
+          # - Higher limit than tenant (allows multiple tenants from same IP)
+          limit_conn ip_conn 10;
+          
+          # Add retry-after header for rate limited requests
+          add_header Retry-After $retry_after always;
+          
+          # Proxy to the Go application
+          proxy_pass http://prometheus_proxy;
+          proxy_buffering on;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          
+          # Preserve tenant headers
+          proxy_set_header X-Tenant-Namespace $http_x_tenant_namespace;
+          
+          # Timeouts
+          proxy_connect_timeout 5s;
+          proxy_send_timeout 30s;
+          proxy_read_timeout 30s;
+        }
+        
+        # Other API endpoints (non-query operations)
+        # Matches: /api/* except query endpoints (labels, series, targets, etc.)
+        location /api/ {
+          # ====================================================================
+          # RATE LIMITING - GENERAL API ENDPOINTS
+          # ====================================================================
+          
+          # More relaxed rate limiting for non-query endpoints
+          # These are typically less resource-intensive operations
+          
+          # TENANT RATE LIMITING: 5r/s + burst of 5 (larger burst than query endpoints)
+          limit_req zone=tenant_limit burst=5 nodelay;
+          
+          # IP RATE LIMITING: 10r/s + burst of 10 (no URI limiting for general endpoints)
+          limit_req zone=ip_limit burst=10 nodelay;
+          
+          # CONNECTION LIMITING: Higher limits for general API operations
+          limit_conn tenant_conn 8;   # Max 8 concurrent connections per tenant
+          limit_conn ip_conn 15;      # Max 15 concurrent connections per IP
+          
+          add_header Retry-After $retry_after always;
+          
+          proxy_pass http://prometheus_proxy;
+          proxy_buffering on;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Tenant-Namespace $http_x_tenant_namespace;
+          
+          proxy_connect_timeout 5s;
+          proxy_send_timeout 30s;
+          proxy_read_timeout 30s;
+        }
+        
+        # Debug endpoints with stricter rate limiting
+        # Matches: /debug/* (internal debugging endpoints)
+        location /debug/ {
+          # ====================================================================
+          # RATE LIMITING - DEBUG ENDPOINTS (STRICTEST)
+          # ====================================================================
+          
+          # Very strict rate limiting for debug endpoints
+          # These endpoints are for troubleshooting and should be used sparingly
+          
+          # TENANT RATE LIMITING: 5r/s + burst of 1 (minimal burst)
+          limit_req zone=tenant_limit burst=1 nodelay;
+          
+          # IP RATE LIMITING: 10r/s + burst of 2 (very small burst)
+          limit_req zone=ip_limit burst=2 nodelay;
+          
+          # CONNECTION LIMITING: Very low limits for debug operations
+          limit_conn tenant_conn 2;   # Max 2 concurrent connections per tenant
+          limit_conn ip_conn 5;       # Max 5 concurrent connections per IP
+          
+          add_header Retry-After $retry_after always;
+          
+          proxy_pass http://prometheus_proxy;
+          proxy_buffering on;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Tenant-Namespace $http_x_tenant_namespace;
+          
+          proxy_connect_timeout 5s;
+          proxy_send_timeout 15s;
+          proxy_read_timeout 15s;
+        }
+        
+        # Metrics endpoint (for prometheus scraping)
+        location /metrics {
+          limit_req zone=ip_limit burst=3 nodelay;
+          limit_conn ip_conn 5;
+          
+          proxy_pass http://prometheus_proxy;
+          proxy_buffering on;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_set_header Host $host;
+          
+          proxy_connect_timeout 5s;
+          proxy_send_timeout 10s;
+          proxy_read_timeout 10s;
+        }
+        
+        # Collected metrics endpoint
+        location /collected-metrics {
+          limit_req zone=tenant_limit burst=1 nodelay;
+          limit_req zone=ip_limit burst=2 nodelay;
+          limit_conn tenant_conn 2;
+          limit_conn ip_conn 3;
+          
+          add_header Retry-After $retry_after always;
+          
+          proxy_pass http://prometheus_proxy;
+          proxy_buffering on;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Tenant-Namespace $http_x_tenant_namespace;
+          
+          proxy_connect_timeout 5s;
+          proxy_send_timeout 60s;
+          proxy_read_timeout 60s;
+        }
+        
+        # Default location - reject all other requests
+        location / {
+          return 404 "Not Found\n";
+          add_header Content-Type text/plain;
+        }
+      }
+    }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-multi-tenant-proxy
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/instance: prometheus-multi-tenant-proxy
+    app.kubernetes.io/name: prometheus-multi-tenant-proxy
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: http
+    protocol: TCP
+    name: http
+  - port: 9113
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  selector:
+    app: prometheus-multi-tenant-proxy
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-multi-tenant-proxy
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/instance: prometheus-multi-tenant-proxy
+    app.kubernetes.io/name: prometheus-multi-tenant-proxy
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-multi-tenant-proxy
+  labels:
+    app.kubernetes.io/instance: prometheus-multi-tenant-proxy
+    app.kubernetes.io/name: prometheus-multi-tenant-proxy
+rules:
+- apiGroups: [""]
+  resources: ["services", "pods", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["observability.ethos.io"]
+  resources: ["metricaccesses"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-multi-tenant-proxy
+  labels:
+    app.kubernetes.io/instance: prometheus-multi-tenant-proxy
+    app.kubernetes.io/name: prometheus-multi-tenant-proxy
+subjects:
+- kind: ServiceAccount
+  name: prometheus-multi-tenant-proxy
+  namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: prometheus-multi-tenant-proxy
+  apiGroup: rbac.authorization.k8s.io 

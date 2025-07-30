@@ -1,0 +1,120 @@
+---
+# Alternative MetricAccess using namespace-based filtering
+# This approach works better with standard Kubernetes metrics
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: bkarthik-metrics-namespace
+  namespace: ns-team-bkarthik
+spec:
+  # Source could match the namespace for easier correlation
+  source: ns-team-bkarthik
+  
+  # Metrics patterns - using namespace label which exists in Kubernetes metrics
+  metrics:
+    # CPU metrics for pods in this namespace
+    - 'container_cpu_usage_seconds_total{namespace="ns-team-bkarthik"}'
+    
+    # Memory metrics for pods in this namespace
+    - 'container_memory_usage_bytes{namespace="ns-team-bkarthik"}'
+    
+    # Network metrics
+    - 'container_network_receive_bytes_total{namespace="ns-team-bkarthik"}'
+    - 'container_network_transmit_bytes_total{namespace="ns-team-bkarthik"}'
+    
+    # Kubernetes state metrics for this namespace
+    - 'kube_pod_status_phase{namespace="ns-team-bkarthik"}'
+    - 'kube_deployment_status_replicas{namespace="ns-team-bkarthik"}'
+    - 'kube_pod_container_status_restarts_total{namespace="ns-team-bkarthik"}'
+    
+    # All metrics from pods in this namespace
+    - '{namespace="ns-team-bkarthik",__name__=~"kube_pod_.*"}'
+    
+    # Node metrics (if the team needs them)
+    - 'node_cpu_seconds_total'
+    - 'node_memory_MemAvailable_bytes'
+  
+  # Remote write to team's Prometheus
+  remoteWrite:
+    enabled: true
+    interval: "30s"
+    target:
+      type: "prometheus"
+    prometheus:
+      serviceName: "prometheus-test"
+      servicePort: 9090
+    extraLabels:
+      tenant: "team-bkarthik"
+      managed_by: "multi-tenant-proxy"
+
+---
+# Alternative using source as a custom label that you add to your metrics
+# This requires your metrics to actually have the source label
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: bkarthik-metrics-source-label
+  namespace: ns-team-bkarthik
+spec:
+  # This assumes metrics are labeled with source="team-bkarthik"
+  source: team-bkarthik
+  
+  # If your metrics have source labels, you can use them
+  metrics:
+    - 'container_cpu_usage_seconds_total{source="team-bkarthik"}'
+    - 'container_memory_usage_bytes{source="team-bkarthik"}'
+    - '{source="team-bkarthik"}'  # All metrics with this source label
+  
+  # Remote write configuration
+  remoteWrite:
+    enabled: true
+    interval: "30s"
+    target:
+      type: "prometheus"
+    prometheus:
+      serviceName: "prometheus-test"
+      servicePort: 9090
+    extraLabels:
+      tenant: "team-bkarthik"
+      managed_by: "multi-tenant-proxy"
+
+---
+# Example 3: Mixed approach - namespace filtering with additional patterns
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: bkarthik-metrics-mixed
+  namespace: ns-team-bkarthik
+spec:
+  source: ns-team-bkarthik
+  
+  metrics:
+    # Namespace-specific container metrics
+    - 'container_cpu_usage_seconds_total{namespace="ns-team-bkarthik"}'
+    - 'container_memory_usage_bytes{namespace="ns-team-bkarthik"}'
+    
+    # Kubernetes state metrics for this namespace
+    - 'kube_pod_status_phase{namespace="ns-team-bkarthik"}'
+    - 'kube_deployment_status_replicas{namespace="ns-team-bkarthik"}'
+    
+    # General cluster metrics that don't have namespace labels
+    - 'up'
+    - 'prometheus_build_info'
+    - 'node_memory_MemAvailable_bytes'
+    - 'kube_node_info'
+    
+    # All pod-related metrics for this namespace
+    - '{namespace="ns-team-bkarthik",__name__=~"kube_pod_.*"}'
+  
+  remoteWrite:
+    enabled: true
+    interval: "30s"
+    target:
+      type: "prometheus"
+    prometheus:
+      serviceName: "prometheus-test"
+      servicePort: 9090
+    extraLabels:
+      tenant: "team-bkarthik"
+      filtering_type: "mixed"
+      managed_by: "multi-tenant-proxy" 

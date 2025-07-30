@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-multi-tenant-proxy-config
+  namespace: monitoring
+  labels:
+    app: prometheus-multi-tenant-proxy
+data:
+  config.yaml: |
+    # Service Discovery Configuration
+    discovery:
+      kubernetes:
+        # Namespaces to watch for Prometheus services (empty = all namespaces)
+        namespaces:
+          - monitoring
+        
+        # Label selectors for discovering Prometheus services
+        label_selectors:
+          app.kubernetes.io/name: prometheus
+        
+        # Port name or number to use for Prometheus services
+        port: "9090"
+        
+        # Resource types to discover (Service, Pod, Endpoints)
+        resource_types:
+          - Pod
+      
+      # How often to refresh the list of targets
+      refresh_interval: 30s
+    
+    # Tenant Management Configuration
+    tenants:
+      # Watch all namespaces for MetricAccess resources
+      watch_all_namespaces: true
+      
+      # Or specify specific namespaces to watch
+      # watch_namespaces:
+      #   - tenant-a
+      #   - tenant-b
+    
+    # Proxy Configuration
+    proxy:
+      # Enable query result caching
+      enable_caching: true
+      cache_ttl: 5m
+      
+      # Enable Prometheus metrics collection
+      enable_metrics: true
+      
+      # Enable request logging
+      enable_request_logging: true
+      
+      # Maximum concurrent requests to backends
+      max_concurrent_requests: 100
+      
+      # Timeout for backend requests
+      backend_timeout: 30s
+    
+    # Remote Write Configuration
+    remote_write:
+      # Enable remote write functionality
+      enabled: true
+      
+      # How often to collect and forward metrics
+      collection_interval: 30s
+      
+      # Batch size for remote write
+      batch_size: 1000
+      
+      # Queue configuration
+      queue_config:
+        capacity: 10000
+        max_shards: 10
+        min_shards: 1
+    
+    # Optional: Authentication Configuration
+    # auth:
+    #   type: "jwt"  # or "apikey" or "none"
+    #   jwt:
+    #     secret_key: "your-secret-key"
+    #     issuer: "prometheus-proxy"
+    #     audience: "prometheus-users"
+    #   # apikey:
+    #   #   header_name: "X-API-Key"
+    #   #   static_keys:
+    #   #     "key1": "tenant-a"
+    #   #     "key2": "tenant-b" 

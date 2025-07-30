@@ -1,0 +1,177 @@
+---
+# Example 1: Remote write to tenant Prometheus instance
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: webapp-metrics-remote-write
+  namespace: webapp-team
+spec:
+  source: webapp-team
+  metrics:
+    - "http_requests_total"
+    - "http_request_duration_seconds"
+    - "http_requests_in_flight"
+    - '{__name__=~"webapp_.*"}'
+    - "up{job=\"webapp\"}"
+  
+  # Remote write configuration
+  remoteWrite:
+    enabled: true
+    interval: "30s"
+    target:
+      type: "prometheus"
+    prometheus:
+      serviceName: "prometheus"
+      servicePort: 9090
+    extraLabels:
+      tenant: "webapp-team"
+      remote_write: "true"
+      managed_by: "multi-tenant-proxy"
+
+---
+# Example 2: Remote write to Pushgateway
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: batch-job-metrics
+  namespace: batch-processing
+spec:
+  source: batch-processing
+  metrics:
+    - "job_duration_seconds"
+    - "job_success_total"
+    - "job_failure_total"
+    - '{job="batch-processor"}'
+  
+  remoteWrite:
+    enabled: true
+    interval: "60s"
+    target:
+      type: "pushgateway"
+    pushgateway:
+      serviceName: "pushgateway"
+      servicePort: 9091
+      jobName: "remote-write-batch-metrics"
+    extraLabels:
+      tenant: "batch-processing"
+      managed_by: "multi-tenant-proxy"
+
+---
+# Example 3: Remote write to external endpoint
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: external-metrics
+  namespace: monitoring-team
+spec:
+  source: monitoring-team
+  metrics:
+    - "prometheus_build_info"
+    - "up"
+    - "prometheus_config_last_reload_successful"
+    - '{__name__=~"prometheus_.*"}'
+  
+  remoteWrite:
+    enabled: true
+    interval: "15s"
+    target:
+      type: "remote_write"
+    remoteWrite:
+      url: "https://external-prometheus.example.com/api/v1/write"
+      basicAuth:
+        username: "monitoring-user"
+        passwordSecret:
+          name: "prometheus-auth"
+          key: "password"
+      headers:
+        X-Tenant: "monitoring-team"
+        X-Cluster: "production"
+    extraLabels:
+      source_cluster: "production"
+      tenant: "monitoring-team"
+      managed_by: "multi-tenant-proxy"
+
+---
+# Example 4: High-frequency remote write for critical metrics
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: critical-sla-metrics
+  namespace: sre-team
+spec:
+  source: sre-team
+  metrics:
+    - "up"
+    - "prometheus_config_last_reload_successful"
+    - '{__name__=~"kube_.*_status.*"}'
+    - "node_load1"
+    - "node_memory_MemAvailable_bytes"
+  
+  remoteWrite:
+    enabled: true
+    interval: "5s"  # High frequency for critical metrics
+    target:
+      type: "prometheus"
+    prometheus:
+      serviceName: "sla-prometheus"
+      servicePort: 9090
+    extraLabels:
+      tenant: "sre-team"
+      priority: "critical"
+      managed_by: "multi-tenant-proxy"
+
+---
+# Example 5: Multi-target remote write (requires multiple MetricAccess resources)
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: monitoring-team-local
+  namespace: monitoring-team
+spec:
+  source: monitoring-team
+  metrics:
+    - "prometheus_build_info"
+    - "up"
+    - "prometheus_config_last_reload_successful"
+    - '{__name__=~"prometheus_.*"}'
+  
+  remoteWrite:
+    enabled: true
+    interval: "30s"
+    target:
+      type: "prometheus"
+    prometheus:
+      serviceName: "prometheus-local"
+      servicePort: 9090
+    extraLabels:
+      tenant: "monitoring-team"
+      target: "local"
+      managed_by: "multi-tenant-proxy"
+
+---
+# Example 6: Namespace-based filtering with remote write
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: namespace-filtered-metrics
+  namespace: development-team
+spec:
+  source: development-team
+  metrics:
+    - 'container_cpu_usage_seconds_total{namespace="development-team"}'
+    - 'container_memory_usage_bytes{namespace="development-team"}'
+    - 'kube_pod_status_phase{namespace="development-team"}'
+    - '{namespace="development-team",__name__=~"kube_pod_.*"}'
+  
+  remoteWrite:
+    enabled: true
+    interval: "30s"
+    target:
+      type: "prometheus"
+    prometheus:
+      serviceName: "prometheus"
+      servicePort: 9090
+    extraLabels:
+      tenant: "development-team"
+      environment: "development"
+      managed_by: "multi-tenant-proxy" 

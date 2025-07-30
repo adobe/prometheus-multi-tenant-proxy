@@ -1,0 +1,32 @@
+---
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: bkarthik-metrics-simple
+  namespace: ns-team-bkarthik
+spec:
+  # Source identifier
+  source: ns-team-bkarthik
+  
+  # Metrics patterns - using available metrics from the cluster
+  metrics:
+    
+    # Node and cluster metrics that are actually available
+    - 'kube_node_info'
+    - 'up'
+    - ':cluster:kube_node_unallocated_cpu_cores:sum'
+    - 'kube_pod_info'
+    - 'node_memory_Active_bytes'
+
+  # Remote write configuration
+  remoteWrite:
+    enabled: true
+    interval: "30s"
+    prometheus:
+      serviceName: "prometheus"
+      servicePort: 9090
+    target:
+      type: "prometheus"
+    extraLabels:
+      tenant: "team-bkarthik"
+      managed_by: "multi-tenant-proxy" 

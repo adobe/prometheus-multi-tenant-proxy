@@ -1,0 +1,181 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: metricaccesses.observability.ethos.io
+  labels:
+    app: prometheus-multi-tenant-proxy
+spec:
+  group: observability.ethos.io
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            required:
+            - metrics
+            - source
+            properties:
+              metrics:
+                type: array
+                description: "List of metric patterns this tenant can access"
+                items:
+                  type: string
+                  examples:
+                  - "foo"
+                  - "bar{label=\"x\"}"
+                  - "{__name__=\"foo\",label=\"x\"}"
+              source:
+                type: string
+                description: "Source namespace or identifier for the metrics"
+              labelSelectors:
+                type: object
+                description: "Additional label selectors for fine-grained access control"
+                additionalProperties:
+                  type: string
+              remoteWrite:
+                type: object
+                description: "Remote write configuration for automatic metric collection"
+                properties:
+                  enabled:
+                    type: boolean
+                    description: "Enable remote write for this tenant"
+                  interval:
+                    type: string
+                    description: "Collection interval (e.g., '30s', '1m')"
+                  target:
+                    type: object
+                    description: "Remote write target configuration"
+                    required:
+                      - type
+                    properties:
+                      type:
+                        type: string
+                        description: "Type of remote write target"
+                        enum:
+                          - prometheus
+                          - pushgateway
+                          - remote_write
+                  prometheus:
+                    type: object
+                    description: "Prometheus target configuration"
+                    properties:
+                      serviceName:
+                        type: string
+                        description: "Service name in tenant namespace"
+                      servicePort:
+                        type: integer
+                        description: "Service port"
+                        default: 9090
+                  pushgateway:
+                    type: object
+                    description: "Pushgateway target configuration"
+                    properties:
+                      serviceName:
+                        type: string
+                        description: "Service name in tenant namespace"
+                      servicePort:
+                        type: integer
+                        description: "Service port"
+                        default: 9091
+                      jobName:
+                        type: string
+                        description: "Job name for pushed metrics"
+                  remoteWrite:
+                    type: object
+                    description: "Remote write target configuration"
+                    properties:
+                      url:
+                        type: string
+                        description: "Remote write endpoint URL"
+                      basicAuth:
+                        type: object
+                        description: "Basic authentication"
+                        properties:
+                          username:
+                            type: string
+                          passwordSecret:
+                            type: object
+                            properties:
+                              name:
+                                type: string
+                              key:
+                                type: string
+                      headers:
+                        type: object
+                        description: "Additional headers"
+                        additionalProperties:
+                          type: string
+                  extraLabels:
+                    type: object
+                    description: "Additional labels to add to federated metrics"
+                    additionalProperties:
+                      type: string
+                  honorLabels:
+                    type: boolean
+                    description: "Honor labels from source"
+          status:
+            type: object
+            properties:
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    reason:
+                      type: string
+                    message:
+                      type: string
+              lastUpdated:
+                type: string
+                format: date-time
+                description: "Last update timestamp"
+              remoteWrite:
+                type: object
+                description: "Remote write status"
+                properties:
+                  active:
+                    type: boolean
+                    description: "Whether remote write is currently active"
+                  lastCollection:
+                    type: string
+                    format: date-time
+                    description: "Last collection timestamp"
+                  metricsCollected:
+                    type: integer
+                    description: "Number of metrics collected in last run"
+                  lastError:
+                    type: string
+                    description: "Last error encountered"
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Source
+      type: string
+      description: "Source namespace"
+      jsonPath: .spec.source
+    - name: Metrics
+      type: integer
+      description: "Number of metric patterns"
+      jsonPath: .spec.metrics[*]
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: metricaccesses
+    singular: metricaccess
+    kind: MetricAccess
+    shortNames:
+    - ma 

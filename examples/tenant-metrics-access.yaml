@@ -1,0 +1,133 @@
+---
+# Example 1: Basic tenant with specific metrics
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: tenant-metrics-access
+  namespace: myusernamespace
+spec:
+  source: myusernamespace
+  metrics:
+    - "up"
+    - "prometheus_build_info"
+    - '{__name__="prometheus_config_last_reload_successful"}'
+
+---
+# Example 2: Development team with broader access
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: dev-team-metrics
+  namespace: development
+spec:
+  source: development
+  metrics:
+    - "up"
+    - "prometheus_build_info"
+    - "prometheus_config_last_reload_successful"
+    - '{__name__=~"prometheus_.*"}'
+    - '{job="my-app"}'  # All metrics from specific job
+
+---
+# Example 3: Production monitoring team with extensive access
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: prod-monitoring-access
+  namespace: production
+spec:
+  source: production
+  metrics:
+    - "up"
+    - "prometheus_build_info"
+    - "prometheus_config_last_reload_successful"
+    - '{__name__=~"prometheus_.*"}'
+    - '{__name__=~"kube_.*"}'
+    - '{__name__=~"node_.*"}'
+    - '{__name__=~"container_.*"}'
+
+---
+# Example 4: Application-specific metrics access
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: webapp-metrics
+  namespace: webapp-team
+spec:
+  source: webapp-team
+  metrics:
+    - "http_requests_total"
+    - "http_request_duration_seconds"
+    - "http_requests_in_flight"
+    - '{__name__=~"webapp_.*"}'  # All webapp-prefixed metrics
+    - "up{job=\"webapp\"}"
+
+---
+# Example 5: Infrastructure team with system metrics
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: infra-system-metrics
+  namespace: infrastructure
+spec:
+  source: infrastructure
+  metrics:
+    - '{__name__=~"node_.*"}'  # All node exporter metrics
+    - '{__name__=~"kube_.*"}'  # All kube-state-metrics
+    - '{__name__=~"container_.*"}'  # All container metrics
+    - '{__name__=~"prometheus_.*"}'  # Prometheus internal metrics
+
+---
+# Example 6: Namespace-based filtering
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: namespace-specific-metrics
+  namespace: team-alpha
+spec:
+  source: team-alpha
+  metrics:
+    - 'container_cpu_usage_seconds_total{namespace="team-alpha"}'
+    - 'container_memory_usage_bytes{namespace="team-alpha"}'
+    - 'kube_pod_status_phase{namespace="team-alpha"}'
+    - '{namespace="team-alpha",__name__=~"kube_pod_.*"}'
+
+---
+# Example 7: Job-based filtering
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: job-specific-metrics
+  namespace: data-processing
+spec:
+  source: data-processing
+  metrics:
+    - '{job="data-processor"}'
+    - '{job="batch-worker"}'
+    - 'up{job=~"data-.*"}'
+    - 'prometheus_build_info{job=~"data-.*"}'
+
+---
+# Example 8: Mixed pattern types
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: mixed-pattern-metrics
+  namespace: monitoring-team
+spec:
+  source: monitoring-team
+  metrics:
+    # Simple metric names
+    - "up"
+    - "prometheus_build_info"
+    
+    # Regex patterns
+    - '{__name__=~"prometheus_.*"}'
+    - '{__name__=~"kube_node_.*"}'
+    
+    # Label-based filtering
+    - '{job="prometheus"}'
+    - '{namespace="monitoring"}'
+    
+    # Complex selectors
+    - '{__name__=~"container_.*",namespace="monitoring"}' 

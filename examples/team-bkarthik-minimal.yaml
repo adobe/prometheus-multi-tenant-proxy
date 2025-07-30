@@ -1,0 +1,104 @@
+---
+# Prometheus StatefulSet for team bkarthik
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prometheus
+  namespace: ns-team-bkarthik
+spec:
+  serviceName: prometheus-test
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.45.0
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus'
+          - '--web.enable-remote-write-receiver'  # Enable remote write receiver
+        ports:
+        - containerPort: 9090
+          name: web
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+        - name: storage
+          mountPath: /prometheus
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-config
+      - name: storage
+        emptyDir: {}  # For testing; use PVC in production
+
+---
+# Service to expose Prometheus pods
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-test
+  namespace: ns-team-bkarthik
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9090
+    targetPort: 9090
+    name: web
+  selector:
+    app: prometheus
+
+---
+# Basic Prometheus configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: ns-team-bkarthik
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    
+    scrape_configs:
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+---
+# MetricAccess custom resource
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: bkarthik-metrics
+  namespace: ns-team-bkarthik
+spec:
+  # Source identifier for this team's metrics
+  source: team-bkarthik
+  
+  # Metrics patterns this team can access
+  metrics:
+    - "up"
+    - "prometheus_build_info"
+    - "prometheus_config_last_reload_successful"
+    - "kube_node_info"
+    - "node_memory_MemAvailable_bytes"
+  
+  # Remote write to team's Prometheus
+  remoteWrite:
+    enabled: true
+    interval: "30s"
+    target:
+      type: "prometheus"
+    prometheus:
+      serviceName: "prometheus-test"  # Points to the service above
+      servicePort: 9090
+    extraLabels:
+      tenant: "team-bkarthik"
+      managed_by: "multi-tenant-proxy" 

@@ -1,0 +1,106 @@
+# Example configuration for Prometheus Multi-Tenant Proxy
+# This configuration is suitable for development and testing
+
+# Service Discovery Configuration
+discovery:
+  kubernetes:
+    # Namespaces to watch for Prometheus services
+    namespaces:
+      - monitoring
+      - default
+    
+    # Label selectors for discovering Prometheus services
+    label_selectors:
+      app.kubernetes.io/name: prometheus
+    
+    # Optional: Annotation selectors for additional filtering
+    annotation_selectors:
+      prometheus.io/scrape: "true"
+    
+    # Port name or number to use for Prometheus services
+    port: "9090"
+    
+    # Resource types to discover
+    resource_types:
+      - Service
+  
+  # How often to refresh the list of targets
+  refresh_interval: 30s
+
+# Tenant Management Configuration
+tenants:
+  # Watch all namespaces for MetricAccess resources
+  watch_all_namespaces: true
+  
+  # Refresh interval for tenant configuration
+  refresh_interval: 30s
+
+# Remote Write Configuration
+remote_write:
+  # Enable remote write controller
+  enabled: true
+  
+  # Default collection interval for remote write jobs
+  default_interval: 30s
+  
+  # Maximum number of concurrent remote write jobs
+  max_concurrent_jobs: 10
+  
+  # Timeout for remote write requests
+  timeout: 30s
+
+# Proxy Configuration
+proxy:
+  # Listen address and port
+  listen_address: "0.0.0.0:8080"
+  
+  # Enable query result caching
+  enable_caching: true
+  cache_ttl: 5m
+  
+  # Enable Prometheus metrics collection
+  enable_metrics: true
+  
+  # Enable request logging
+  enable_request_logging: true
+  
+  # Maximum concurrent requests to backends
+  max_concurrent_requests: 100
+  
+  # Timeout for backend requests
+  backend_timeout: 30s
+  
+  # Enable tenant filtering
+  enable_tenant_filtering: true
+
+# Logging Configuration
+logging:
+  level: "info"
+  format: "json"
+  
+# Health Check Configuration
+health:
+  # Enable health check endpoint
+  enabled: true
+  
+  # Health check endpoint path
+  path: "/health"
+
+# Metrics Configuration
+metrics:
+  # Enable metrics endpoint
+  enabled: true
+  
+  # Metrics endpoint path
+  path: "/metrics"
+  
+  # Metrics namespace
+  namespace: "prometheus_multi_tenant_proxy"
+
+# Authentication Configuration
+# Note: Authentication is disabled for development
+# Enable and configure for production use
+auth:
+  enabled: false
+  # type: "header"  # or "jwt", "basic"
+  # header_name: "X-Tenant-Namespace" 
