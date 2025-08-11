@@ -20,7 +20,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o prometheus-multi-tenant-proxy ./cmd/proxy
 
 # Final stage
-FROM alpine:3.19
+FROM alpine:3.22
 
 # Install curl
 RUN apk add --no-cache curl ca-certificates
