@@ -21,6 +21,11 @@ type MetricAccessSpec struct {
 	// Optional: Additional label selectors for fine-grained access control
 	LabelSelectors map[string]string `json:"labelSelectors,omitempty"`
 
+	// MetricIsolation enables namespace-level isolation for this tenant's metric collection
+	// When true, metrics will be collected through prom-label-proxy with namespace filtering
+	// This ensures only namespace-specific metrics are stored in the tenant's Prometheus
+	MetricIsolation bool `json:"metricIsolation,omitempty"`
+
 	// Remote write configuration for automatic metric collection
 	RemoteWrite *RemoteWriteConfig `json:"remoteWrite,omitempty"`
 }

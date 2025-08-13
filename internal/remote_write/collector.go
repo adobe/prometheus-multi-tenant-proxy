@@ -88,22 +88,37 @@ func (c *PrometheusCollector) Send(ctx context.Context, metricAccess *v1alpha1.M
 			Value: m.Name,
 		})
 
-		// Add all labels
+		// Create a map to track label names and prevent duplicates
+		labelMap := make(map[string]string)
+		
+		// Add all original labels
 		for name, value := range m.Labels {
-			ts.Labels = append(ts.Labels, prompb.Label{
-				Name:  string(name),
-				Value: string(value),
-			})
+			labelMap[string(name)] = string(value)
 		}
 
-		// Add extra labels from MetricAccess if specified
+		// Add extra labels from MetricAccess if specified, with conflict resolution
 		if metricAccess.Spec.RemoteWrite.ExtraLabels != nil {
 			for name, value := range metricAccess.Spec.RemoteWrite.ExtraLabels {
-				ts.Labels = append(ts.Labels, prompb.Label{
-					Name:  name,
-					Value: value,
-				})
+				if existingValue, exists := labelMap[name]; exists {
+					// Label already exists - log warning and skip to avoid duplicate
+					logrus.WithFields(logrus.Fields{
+						"metric_name":     m.Name,
+						"label_name":      name,
+						"existing_value":  existingValue,
+						"attempted_value": value,
+					}).Warn("DIAGNOSTIC: Skipping duplicate label from extraLabels")
+					continue
+				}
+				labelMap[name] = value
 			}
+		}
+		
+		// Convert map back to label slice
+		for name, value := range labelMap {
+			ts.Labels = append(ts.Labels, prompb.Label{
+				Name:  name,
+				Value: value,
+			})
 		}
 
 		timeseries = append(timeseries, ts)

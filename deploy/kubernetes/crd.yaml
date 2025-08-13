@@ -1,181 +1,339 @@
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
   name: metricaccesses.observability.ethos.io
-  labels:
-    app: prometheus-multi-tenant-proxy
 spec:
   group: observability.ethos.io
+  names:
+    kind: MetricAccess
+    listKind: MetricAccessList
+    plural: metricaccesses
+    singular: metricaccess
+  scope: Namespaced
   versions:
   - name: v1alpha1
-    served: true
-    storage: true
     schema:
       openAPIV3Schema:
-        type: object
+        description: MetricAccess is the Schema for the metricaccesses API
         properties:
-          spec:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
             type: object
+          spec:
+            description: MetricAccessSpec defines the desired state of MetricAccess
+            properties:
+              labelSelectors:
+                additionalProperties:
+                  type: string
+                description: 'Optional: Additional label selectors for fine-grained
+                  access control'
+                type: object
+              metricIsolation:
+                description: |-
+                  MetricIsolation enables namespace-level isolation for this tenant's metric collection
+                  When true, metrics will be collected through prom-label-proxy with namespace filtering
+                  This ensures only namespace-specific metrics are stored in the tenant's Prometheus
+                type: boolean
+              metrics:
+                description: |-
+                  Metrics defines the list of metric patterns this tenant can access
+                  Supports metric names, label selectors, and PromQL-like expressions
+                  Examples:
+                  - "foo" (exact metric name)
+                  - "bar{label=\"x\"}" (metric with specific label)
+                  - "{__name__=\"foo\",label=\"x\"}" (PromQL-style selector)
+                items:
+                  type: string
+                type: array
+              remoteWrite:
+                description: Remote write configuration for automatic metric collection
+                properties:
+                  enabled:
+                    description: Enabled determines if remote write is active for
+                      this tenant
+                    type: boolean
+                  extraLabels:
+                    additionalProperties:
+                      type: string
+                    description: Extra labels to add to all metrics
+                    type: object
+                  honorLabels:
+                    description: Honor labels from the source metrics
+                    type: boolean
+                  interval:
+                    description: Collection interval (e.g., "30s", "1m")
+                    type: string
+                  prometheus:
+                    description: Prometheus target configuration (at same level as
+                      target for CRD compatibility)
+                    properties:
+                      serviceName:
+                        description: Service name in the tenant namespace
+                        type: string
+                      servicePort:
+                        description: 'Service port (default: 9090)'
+                        format: int32
+                        type: integer
+                    required:
+                    - serviceName
+                    type: object
+                  pushgateway:
+                    description: Pushgateway target configuration (at same level as
+                      target for CRD compatibility)
+                    properties:
+                      jobName:
+                        description: Job name for pushed metrics
+                        type: string
+                      serviceName:
+                        description: Service name in the tenant namespace
+                        type: string
+                      servicePort:
+                        description: 'Service port (default: 9091)'
+                        format: int32
+                        type: integer
+                    required:
+                    - jobName
+                    - serviceName
+                    type: object
+                  remoteWrite:
+                    description: Remote write target configuration (at same level
+                      as target for CRD compatibility)
+                    properties:
+                      basicAuth:
+                        description: Optional authentication
+                        properties:
+                          passwordSecret:
+                            description: Password reference (secret name and key)
+                            properties:
+                              key:
+                                description: Key within the secret
+                                type: string
+                              name:
+                                description: Name of the secret
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                          username:
+                            description: Username for basic auth
+                            type: string
+                        required:
+                        - passwordSecret
+                        - username
+                        type: object
+                      headers:
+                        additionalProperties:
+                          type: string
+                        description: Optional headers
+                        type: object
+                      url:
+                        description: URL of the remote write endpoint
+                        type: string
+                    required:
+                    - url
+                    type: object
+                  target:
+                    description: Target configuration for where to send metrics
+                    properties:
+                      prometheus:
+                        description: Prometheus target configuration
+                        properties:
+                          serviceName:
+                            description: Service name in the tenant namespace
+                            type: string
+                          servicePort:
+                            description: 'Service port (default: 9090)'
+                            format: int32
+                            type: integer
+                        required:
+                        - serviceName
+                        type: object
+                      pushgateway:
+                        description: Pushgateway target configuration
+                        properties:
+                          jobName:
+                            description: Job name for pushed metrics
+                            type: string
+                          serviceName:
+                            description: Service name in the tenant namespace
+                            type: string
+                          servicePort:
+                            description: 'Service port (default: 9091)'
+                            format: int32
+                            type: integer
+                        required:
+                        - jobName
+                        - serviceName
+                        type: object
+                      remoteWrite:
+                        description: Remote write target configuration
+                        properties:
+                          basicAuth:
+                            description: Optional authentication
+                            properties:
+                              passwordSecret:
+                                description: Password reference (secret name and key)
+                                properties:
+                                  key:
+                                    description: Key within the secret
+                                    type: string
+                                  name:
+                                    description: Name of the secret
+                                    type: string
+                                required:
+                                - key
+                                - name
+                                type: object
+                              username:
+                                description: Username for basic auth
+                                type: string
+                            required:
+                            - passwordSecret
+                            - username
+                            type: object
+                          headers:
+                            additionalProperties:
+                              type: string
+                            description: Optional headers
+                            type: object
+                          url:
+                            description: URL of the remote write endpoint
+                            type: string
+                        required:
+                        - url
+                        type: object
+                      type:
+                        description: 'Type of target: "prometheus", "pushgateway",
+                          "remote_write"'
+                        type: string
+                    required:
+                    - type
+                    type: object
+                required:
+                - enabled
+                - target
+                type: object
+              source:
+                description: |-
+                  Source defines the namespace or source identifier for the metrics
+                  This helps scope the metrics to specific sources
+                type: string
             required:
             - metrics
             - source
-            properties:
-              metrics:
-                type: array
-                description: "List of metric patterns this tenant can access"
-                items:
-                  type: string
-                  examples:
-                  - "foo"
-                  - "bar{label=\"x\"}"
-                  - "{__name__=\"foo\",label=\"x\"}"
-              source:
-                type: string
-                description: "Source namespace or identifier for the metrics"
-              labelSelectors:
-                type: object
-                description: "Additional label selectors for fine-grained access control"
-                additionalProperties:
-                  type: string
-              remoteWrite:
-                type: object
-                description: "Remote write configuration for automatic metric collection"
-                properties:
-                  enabled:
-                    type: boolean
-                    description: "Enable remote write for this tenant"
-                  interval:
-                    type: string
-                    description: "Collection interval (e.g., '30s', '1m')"
-                  target:
-                    type: object
-                    description: "Remote write target configuration"
-                    required:
-                      - type
-                    properties:
-                      type:
-                        type: string
-                        description: "Type of remote write target"
-                        enum:
-                          - prometheus
-                          - pushgateway
-                          - remote_write
-                  prometheus:
-                    type: object
-                    description: "Prometheus target configuration"
-                    properties:
-                      serviceName:
-                        type: string
-                        description: "Service name in tenant namespace"
-                      servicePort:
-                        type: integer
-                        description: "Service port"
-                        default: 9090
-                  pushgateway:
-                    type: object
-                    description: "Pushgateway target configuration"
-                    properties:
-                      serviceName:
-                        type: string
-                        description: "Service name in tenant namespace"
-                      servicePort:
-                        type: integer
-                        description: "Service port"
-                        default: 9091
-                      jobName:
-                        type: string
-                        description: "Job name for pushed metrics"
-                  remoteWrite:
-                    type: object
-                    description: "Remote write target configuration"
-                    properties:
-                      url:
-                        type: string
-                        description: "Remote write endpoint URL"
-                      basicAuth:
-                        type: object
-                        description: "Basic authentication"
-                        properties:
-                          username:
-                            type: string
-                          passwordSecret:
-                            type: object
-                            properties:
-                              name:
-                                type: string
-                              key:
-                                type: string
-                      headers:
-                        type: object
-                        description: "Additional headers"
-                        additionalProperties:
-                          type: string
-                  extraLabels:
-                    type: object
-                    description: "Additional labels to add to federated metrics"
-                    additionalProperties:
-                      type: string
-                  honorLabels:
-                    type: boolean
-                    description: "Honor labels from source"
-          status:
             type: object
+          status:
+            description: MetricAccessStatus defines the observed state of MetricAccess
             properties:
               conditions:
-                type: array
+                description: Conditions represent the latest available observations
+                  of the MetricAccess state
                 items:
-                  type: object
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
                   properties:
-                    type:
-                      type: string
-                    status:
-                      type: string
                     lastTransitionTime:
-                      type: string
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
                       format: date-time
-                    reason:
                       type: string
                     message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
                       type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
               lastUpdated:
-                type: string
+                description: LastUpdated represents the last time the status was updated
                 format: date-time
-                description: "Last update timestamp"
+                type: string
               remoteWrite:
-                type: object
-                description: "Remote write status"
+                description: Remote write status
                 properties:
                   active:
+                    description: Active indicates if remote write is currently running
                     type: boolean
-                    description: "Whether remote write is currently active"
                   lastCollection:
-                    type: string
+                    description: Last collection time
                     format: date-time
-                    description: "Last collection timestamp"
-                  metricsCollected:
-                    type: integer
-                    description: "Number of metrics collected in last run"
-                  lastError:
                     type: string
-                    description: "Last error encountered"
+                  lastError:
+                    description: Last error encountered
+                    type: string
+                  metricsCollected:
+                    description: Number of metrics collected in last run
+                    format: int32
+                    type: integer
+                required:
+                - active
+                type: object
+              validatedMetrics:
+                description: ValidatedMetrics contains the list of validated metric
+                  patterns
+                items:
+                  type: string
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
     subresources:
       status: {}
-    additionalPrinterColumns:
-    - name: Source
-      type: string
-      description: "Source namespace"
-      jsonPath: .spec.source
-    - name: Metrics
-      type: integer
-      description: "Number of metric patterns"
-      jsonPath: .spec.metrics[*]
-    - name: Age
-      type: date
-      jsonPath: .metadata.creationTimestamp
-  scope: Namespaced
-  names:
-    plural: metricaccesses
-    singular: metricaccess
-    kind: MetricAccess
-    shortNames:
-    - ma 

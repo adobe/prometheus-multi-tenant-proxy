@@ -31,8 +31,8 @@ spec:
         prometheus.io/port: "9113"
         prometheus.io/path: "/metrics"
         # Force pod restart when configmap changes
-        configmap/prometheus-multi-tenant-proxy-config: "v1.0.0"
-        configmap/prometheus-multi-tenant-proxy-nginx-config: "v1.0.0"
+        configmap/prometheus-multi-tenant-proxy-config: "v1.1.0"
+        configmap/prometheus-multi-tenant-proxy-nginx-config: "v1.1.0"
     spec:
       affinity:
         nodeAffinity:
@@ -104,6 +104,57 @@ spec:
             runAsUser: 101  # nginx user
             runAsGroup: 101
             readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          
+        # Prom-label-proxy for namespace-level metrics isolation
+        - name: prom-label-proxy
+          image: quay.io/prometheuscommunity/prom-label-proxy:v0.8.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--upstream=http://localhost:8080"
+            - "--label=namespace"
+            - "--enable-label-apis"
+            - "--insecure-listen-address=0.0.0.0:8082"
+            - "--header-name=X-Tenant-Namespace"
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+          ports:
+            - containerPort: 8082
+              name: label-proxy
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m       # Lightweight proxy
+              memory: 64Mi   # Minimal memory footprint
+            limits:
+              cpu: 200m      # Sufficient for label injection
+              memory: 128Mi  # Memory for request processing
+          livenessProbe:
+            tcpSocket:
+              port: label-proxy
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: label-proxy
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
             capabilities:
               drop:
                 - ALL
@@ -287,7 +338,9 @@ metadata:
     app.kubernetes.io/name: prometheus-multi-tenant-proxy
 data:
   nginx.conf: |
-    # Basic nginx configuration for multi-tenant proxy
+    # Nginx configuration for multi-tenant proxy with namespace isolation
+    # Architecture: nginx -> prom-label-proxy (port 8082) -> Go app (port 8080)
+    # prom-label-proxy automatically injects namespace filters for true isolation
     worker_processes auto;
     error_log /dev/stderr warn;
     pid /var/run/nginx.pid;
@@ -398,7 +451,14 @@ data:
         429 '30';  # Tell clients to retry after 30 seconds when rate limited
       }
       
+      # Upstream to prom-label-proxy for namespace isolation
       upstream prometheus_proxy {
+        server localhost:8082 max_fails=3 fail_timeout=30s;
+        keepalive 8;
+      }
+      
+      # Direct upstream to the Go app (for non-Prometheus API endpoints)
+      upstream prometheus_proxy_direct {
         server localhost:8080 max_fails=3 fail_timeout=30s;
         keepalive 8;
       }
@@ -428,8 +488,9 @@ data:
           deny all;
         }
         
-        # Prometheus API endpoints with rate limiting
+        # Prometheus API endpoints with rate limiting and namespace isolation
         # Matches: /api/v1/query and /api/v1/query_range (most resource-intensive endpoints)
+        # Routes through prom-label-proxy for automatic namespace filtering
         location ~* ^/api/v1/(query|query_range) {
           # ====================================================================
           # RATE LIMITING APPLICATION - QUERY ENDPOINTS
@@ -491,8 +552,9 @@ data:
           proxy_read_timeout 30s;
         }
         
-        # Other API endpoints (non-query operations)
+        # Other API endpoints (non-query operations) with namespace isolation
         # Matches: /api/* except query endpoints (labels, series, targets, etc.)
+        # Routes through prom-label-proxy for automatic namespace filtering
         location /api/ {
           # ====================================================================
           # RATE LIMITING - GENERAL API ENDPOINTS
@@ -528,7 +590,7 @@ data:
           proxy_read_timeout 30s;
         }
         
-        # Debug endpoints with stricter rate limiting
+        # Debug endpoints with stricter rate limiting - direct to Go app
         # Matches: /debug/* (internal debugging endpoints)
         location /debug/ {
           # ====================================================================
@@ -550,7 +612,7 @@ data:
           
           add_header Retry-After $retry_after always;
           
-          proxy_pass http://prometheus_proxy;
+          proxy_pass http://prometheus_proxy_direct;
           proxy_buffering on;
           proxy_http_version 1.1;
           proxy_set_header Connection "";
@@ -565,12 +627,12 @@ data:
           proxy_read_timeout 15s;
         }
         
-        # Metrics endpoint (for prometheus scraping)
+        # Metrics endpoint (for prometheus scraping) - direct to Go app
         location /metrics {
           limit_req zone=ip_limit burst=3 nodelay;
           limit_conn ip_conn 5;
           
-          proxy_pass http://prometheus_proxy;
+          proxy_pass http://prometheus_proxy_direct;
           proxy_buffering on;
           proxy_http_version 1.1;
           proxy_set_header Connection "";
@@ -581,7 +643,7 @@ data:
           proxy_read_timeout 10s;
         }
         
-        # Collected metrics endpoint
+        # Collected metrics endpoint - direct to Go app
         location /collected-metrics {
           limit_req zone=tenant_limit burst=1 nodelay;
           limit_req zone=ip_limit burst=2 nodelay;
@@ -590,7 +652,7 @@ data:
           
           add_header Retry-After $retry_after always;
           
-          proxy_pass http://prometheus_proxy;
+          proxy_pass http://prometheus_proxy_direct;
           proxy_buffering on;
           proxy_http_version 1.1;
           proxy_set_header Connection "";

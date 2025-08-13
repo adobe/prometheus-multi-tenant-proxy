@@ -8,25 +8,37 @@ spec:
   # Source identifier
   source: ns-team-bkarthik
   
-  # Metrics patterns - using available metrics from the cluster
+  # Enable metric isolation for this tenant - collects only namespace-specific metrics
+  # When true, metrics are collected through prom-label-proxy with namespace filtering
+  metricIsolation: true
+  
+  # Metrics patterns - namespace-aware with prom-label-proxy
   metrics:
+    # ✅ Metrics that will be automatically filtered to this namespace
+    - 'kube_pod_info'                    # Only pods in ns-team-bkarthik
+    - 'kube_deployment_status_replicas'  # Only deployments in ns-team-bkarthik
+    - 'container_cpu_usage_seconds_total' # Only containers in ns-team-bkarthik
+    - 'container_memory_usage_bytes'     # Only containers in ns-team-bkarthik
     
-    # Node and cluster metrics that are actually available
-    - 'kube_node_info'
-    - 'up'
-    - ':cluster:kube_node_unallocated_cpu_cores:sum'
-    - 'kube_pod_info'
-    - 'node_memory_Active_bytes'
+    # ✅ Application metrics (if your apps expose them)
+    - 'http_requests_total'              # Your app metrics in ns-team-bkarthik
+    - 'http_request_duration_seconds'    # Your app metrics in ns-team-bkarthik
+    
+    # ⚠️ Cluster-level metrics (may not work with namespace filtering)
+    # These might be blocked by prom-label-proxy if they don't have namespace labels
+    - 'kube_node_info'                 # No namespace label - might be blocked
+    - 'up'                             # No namespace label - might be blocked
+    - 'node_memory_Active_bytes'       # No namespace label - might be blocked
 
   # Remote write configuration
   remoteWrite:
     enabled: true
     interval: "30s"
+    target:
+      type: "prometheus"
     prometheus:
       serviceName: "prometheus"
       servicePort: 9090
-    target:
-      type: "prometheus"
     extraLabels:
-      tenant: "team-bkarthik"
+      source_tenant: "team-bkarthik"
       managed_by: "multi-tenant-proxy" 

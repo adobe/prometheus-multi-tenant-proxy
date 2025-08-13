@@ -443,7 +443,7 @@ func (c *Controller) collectFromTarget(job *RemoteWriteJob, target discovery.Tar
 			"target_url":    target.URL,
 		}).Debug("DIAGNOSTIC: Querying with standard pattern")
 		
-		metricResults, err := c.queryPromQL(client, target.URL, queryPattern)
+		metricResults, err := c.queryPromQL(client, target.URL, queryPattern, job)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"error":        err,
@@ -482,7 +482,7 @@ func (c *Controller) collectFromTarget(job *RemoteWriteJob, target discovery.Tar
 					"target_url":    target.URL,
 				}).Debug("DIAGNOSTIC: Trying node-exporter specific pattern")
 				
-				nodeMetrics, err := c.queryPromQL(client, target.URL, nodeQueryPattern)
+				nodeMetrics, err := c.queryPromQL(client, target.URL, nodeQueryPattern, job)
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
 						"error":        err,
@@ -514,7 +514,7 @@ func (c *Controller) collectFromTarget(job *RemoteWriteJob, target discovery.Tar
 				"target_url":    target.URL,
 			}).Debug("DIAGNOSTIC: Trying generic pattern without selectors")
 			
-			flexibleMetrics, err := c.queryPromQL(client, target.URL, flexibleQueryPattern)
+			flexibleMetrics, err := c.queryPromQL(client, target.URL, flexibleQueryPattern, job)
 			if err != nil {
 				logrus.WithFields(logrus.Fields{
 					"error":        err,
@@ -549,30 +549,64 @@ func (c *Controller) collectFromTarget(job *RemoteWriteJob, target discovery.Tar
 }
 
 // queryPromQL queries the Prometheus instance for the given PromQL query
-func (c *Controller) queryPromQL(client *http.Client, targetURL, query string) ([]Metric, error) {
-	// Query the target directly instead of going through the proxy
-	// This ensures we can find metrics that exist on specific targets
-	queryURL := fmt.Sprintf("%s/api/v1/query?query=%s", targetURL, url.QueryEscape(query))
+func (c *Controller) queryPromQL(client *http.Client, targetURL, query string, job *RemoteWriteJob) ([]Metric, error) {
+	var queryURL string
+	var req *http.Request
+	var err error
 	
-	logrus.WithFields(logrus.Fields{
-		"query_url": queryURL,
-		"query": query,
-		"target_url": targetURL,
-		"using_proxy": false,
-	}).Debug("DIAGNOSTIC: Making Prometheus query directly to target")
-	
-	// Create request
-	req, err := http.NewRequest("GET", queryURL, nil)
-	if err != nil {
+	// Check if metric isolation is enabled for this specific tenant
+	if job.MetricAccess.Spec.MetricIsolation {
+		// Use prom-label-proxy for namespace-filtered queries
+		// Construct URL to prom-label-proxy (port 8082) instead of direct target
+		proxyURL := "http://localhost:8082/api/v1/query?query=" + url.QueryEscape(query)
+		queryURL = proxyURL
+		
+		// Create request with namespace header for prom-label-proxy
+		req, err = http.NewRequest("GET", queryURL, nil)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"error": err,
+				"url":   queryURL,
+			}).Error("DIAGNOSTIC: Failed to create HTTP request for prom-label-proxy")
+			return nil, err
+		}
+		
+		// Add the tenant namespace header for prom-label-proxy filtering
+		req.Header.Set("X-Tenant-Namespace", job.MetricAccess.Namespace)
+		req.Header.Set("User-Agent", "prometheus-multi-tenant-proxy/remote-write-controller")
+		
 		logrus.WithFields(logrus.Fields{
-			"error": err,
-			"url":   queryURL,
-		}).Error("DIAGNOSTIC: Failed to create HTTP request")
-		return nil, err
+			"query_url": queryURL,
+			"query": query,
+			"target_url": targetURL,
+			"using_proxy": true,
+			"tenant_namespace": job.MetricAccess.Namespace,
+		}).Debug("DIAGNOSTIC: Making Prometheus query through prom-label-proxy with namespace filtering")
+		
+	} else {
+		// Query the target directly (original behavior)
+		queryURL = fmt.Sprintf("%s/api/v1/query?query=%s", targetURL, url.QueryEscape(query))
+		
+		// Create request
+		req, err = http.NewRequest("GET", queryURL, nil)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"error": err,
+				"url":   queryURL,
+			}).Error("DIAGNOSTIC: Failed to create HTTP request")
+			return nil, err
+		}
+		
+		// Add user agent for identification
+		req.Header.Set("User-Agent", "prometheus-multi-tenant-proxy/remote-write-controller")
+		
+		logrus.WithFields(logrus.Fields{
+			"query_url": queryURL,
+			"query": query,
+			"target_url": targetURL,
+			"using_proxy": false,
+		}).Debug("DIAGNOSTIC: Making Prometheus query directly to target")
 	}
-	
-	// Add user agent for identification
-	req.Header.Set("User-Agent", "prometheus-multi-tenant-proxy/remote-write-controller")
 	
 	logrus.WithFields(logrus.Fields{
 		"headers": req.Header,
