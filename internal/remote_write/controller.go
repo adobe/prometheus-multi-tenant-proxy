@@ -157,16 +157,33 @@ func (c *Controller) reconcileRemoteWriteJobs(ctx context.Context) error {
 	defer c.mu.Unlock()
 	
 	// Track which jobs should exist
-	desiredJobs := make(map[string]bool)
+	desiredJobs := make(map[string]*v1alpha1.MetricAccess)
 	
 	for _, metricAccess := range metricAccessList.Items {
 		key := fmt.Sprintf("%s/%s", metricAccess.Namespace, metricAccess.Name)
 		
 		if metricAccess.Spec.RemoteWrite != nil && metricAccess.Spec.RemoteWrite.Enabled {
-			desiredJobs[key] = true
+			desiredJobs[key] = &metricAccess
 			
-			// Create job if it doesn't exist
-			if _, exists := c.jobs[key]; !exists {
+			// Check if job exists and if configuration has changed
+			if existingJob, exists := c.jobs[key]; exists {
+				// Check if the configuration has changed
+				if c.hasConfigurationChanged(existingJob.MetricAccess, &metricAccess) {
+					logrus.WithFields(logrus.Fields{
+						"namespace": metricAccess.Namespace,
+						"name":     metricAccess.Name,
+					}).Info("DIAGNOSTIC: MetricAccess configuration changed, restarting remote write job")
+					
+					// Stop the existing job
+					c.stopRemoteWriteJobLocked(key, existingJob)
+					
+					// Create a new job with updated configuration
+					if err := c.createRemoteWriteJobLocked(ctx, &metricAccess); err != nil {
+						logrus.Errorf("Failed to recreate remote write job for %s: %v", key, err)
+					}
+				}
+			} else {
+				// Create job if it doesn't exist
 				if err := c.createRemoteWriteJobLocked(ctx, &metricAccess); err != nil {
 					logrus.Errorf("Failed to create remote write job for %s: %v", key, err)
 				}
@@ -176,7 +193,7 @@ func (c *Controller) reconcileRemoteWriteJobs(ctx context.Context) error {
 	
 	// Stop jobs that should no longer exist
 	for key, job := range c.jobs {
-		if !desiredJobs[key] {
+		if _, shouldExist := desiredJobs[key]; !shouldExist {
 			c.stopRemoteWriteJobLocked(key, job)
 		}
 	}
@@ -248,6 +265,99 @@ func (c *Controller) stopAllJobs() {
 	for key, job := range c.jobs {
 		c.stopRemoteWriteJobLocked(key, job)
 	}
+}
+
+// hasConfigurationChanged checks if the MetricAccess configuration has changed in ways that require job restart
+func (c *Controller) hasConfigurationChanged(oldMA, newMA *v1alpha1.MetricAccess) bool {
+	// Check if metricIsolation setting changed
+	if oldMA.Spec.MetricIsolation != newMA.Spec.MetricIsolation {
+		logrus.WithFields(logrus.Fields{
+			"namespace":           newMA.Namespace,
+			"name":               newMA.Name,
+			"old_metric_isolation": oldMA.Spec.MetricIsolation,
+			"new_metric_isolation": newMA.Spec.MetricIsolation,
+		}).Info("DIAGNOSTIC: metricIsolation setting changed")
+		return true
+	}
+	
+	// Check if metrics patterns changed
+	if len(oldMA.Spec.Metrics) != len(newMA.Spec.Metrics) {
+		logrus.WithFields(logrus.Fields{
+			"namespace":    newMA.Namespace,
+			"name":        newMA.Name,
+			"old_count":   len(oldMA.Spec.Metrics),
+			"new_count":   len(newMA.Spec.Metrics),
+		}).Info("DIAGNOSTIC: metrics patterns count changed")
+		return true
+	}
+	
+	// Check individual metric patterns
+	oldMetrics := make(map[string]bool)
+	for _, metric := range oldMA.Spec.Metrics {
+		oldMetrics[metric] = true
+	}
+	
+	for _, metric := range newMA.Spec.Metrics {
+		if !oldMetrics[metric] {
+			logrus.WithFields(logrus.Fields{
+				"namespace":   newMA.Namespace,
+				"name":       newMA.Name,
+				"new_metric": metric,
+			}).Info("DIAGNOSTIC: new metric pattern detected")
+			return true
+		}
+	}
+	
+	// Check if remote write configuration changed
+	if oldMA.Spec.RemoteWrite != nil && newMA.Spec.RemoteWrite != nil {
+		// Check interval
+		if oldMA.Spec.RemoteWrite.Interval != newMA.Spec.RemoteWrite.Interval {
+			logrus.WithFields(logrus.Fields{
+				"namespace":     newMA.Namespace,
+				"name":         newMA.Name,
+				"old_interval": oldMA.Spec.RemoteWrite.Interval,
+				"new_interval": newMA.Spec.RemoteWrite.Interval,
+			}).Info("DIAGNOSTIC: remote write interval changed")
+			return true
+		}
+		
+		// Check target configuration
+		if oldMA.Spec.RemoteWrite.Target.Type != newMA.Spec.RemoteWrite.Target.Type {
+			logrus.WithFields(logrus.Fields{
+				"namespace":       newMA.Namespace,
+				"name":           newMA.Name,
+				"old_target_type": oldMA.Spec.RemoteWrite.Target.Type,
+				"new_target_type": newMA.Spec.RemoteWrite.Target.Type,
+			}).Info("DIAGNOSTIC: remote write target type changed")
+			return true
+		}
+		
+		// Check extraLabels
+		if !c.compareExtraLabels(oldMA.Spec.RemoteWrite.ExtraLabels, newMA.Spec.RemoteWrite.ExtraLabels) {
+			logrus.WithFields(logrus.Fields{
+				"namespace": newMA.Namespace,
+				"name":     newMA.Name,
+			}).Info("DIAGNOSTIC: extraLabels configuration changed")
+			return true
+		}
+	}
+	
+	return false
+}
+
+// compareExtraLabels compares two extraLabels maps for equality
+func (c *Controller) compareExtraLabels(old, new map[string]string) bool {
+	if len(old) != len(new) {
+		return false
+	}
+	
+	for key, oldValue := range old {
+		if newValue, exists := new[key]; !exists || oldValue != newValue {
+			return false
+		}
+	}
+	
+	return true
 }
 
 // runRemoteWriteJob runs a remote write job until stopped
