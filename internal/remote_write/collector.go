@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gogo/protobuf/proto"
@@ -46,160 +49,82 @@ func NewPrometheusCollector(client client.Client) Collector {
 
 // Send implements the Collector interface for Prometheus targets
 func (c *PrometheusCollector) Send(ctx context.Context, metricAccess *v1alpha1.MetricAccess, metrics []Metric) error {
-	// Get the Prometheus target configuration
 	target := metricAccess.Spec.RemoteWrite.Prometheus
 	if target == nil {
 		return fmt.Errorf("prometheus target configuration is missing")
 	}
-	
-	// Construct the remote write URL
+
 	port := target.ServicePort
 	if port == 0 {
-		port = 9090 // Default Prometheus port
-	}
-	
-	url := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d/api/v1/write", 
-		target.ServiceName, 
-		metricAccess.Namespace, 
-		port)
-	
-	logrus.WithFields(logrus.Fields{
-		"url":           url,
-		"namespace":     metricAccess.Namespace,
-		"service":       target.ServiceName,
-		"port":          port,
-		"metric_count":  len(metrics),
-	}).Info("DIAGNOSTIC: Sending metrics via remote write to Prometheus")
-	
-	// Convert metrics to Prometheus remote write format
-	var timeseries []prompb.TimeSeries
-	for _, m := range metrics {
-		ts := prompb.TimeSeries{
-			Labels: make([]prompb.Label, 0, len(m.Labels)+1),
-			Samples: []prompb.Sample{{
-				Value:     m.Value,
-				Timestamp: m.Timestamp.UnixNano() / int64(time.Millisecond),
-			}},
-		}
-
-		// Add metric name
-		ts.Labels = append(ts.Labels, prompb.Label{
-			Name:  "__name__",
-			Value: m.Name,
-		})
-
-		// Create a map to track label names and prevent duplicates
-		labelMap := make(map[string]string)
-		
-		// Add all original labels
-		for name, value := range m.Labels {
-			labelMap[string(name)] = string(value)
-		}
-
-		// Add extra labels from MetricAccess if specified, with conflict resolution
-		if metricAccess.Spec.RemoteWrite.ExtraLabels != nil {
-			for name, value := range metricAccess.Spec.RemoteWrite.ExtraLabels {
-				if existingValue, exists := labelMap[name]; exists {
-					// Label already exists - log warning and skip to avoid duplicate
-					logrus.WithFields(logrus.Fields{
-						"metric_name":     m.Name,
-						"label_name":      name,
-						"existing_value":  existingValue,
-						"attempted_value": value,
-					}).Warn("DIAGNOSTIC: Skipping duplicate label from extraLabels")
-					continue
-				}
-				labelMap[name] = value
-			}
-		}
-		
-		// Convert map back to label slice
-		for name, value := range labelMap {
-			ts.Labels = append(ts.Labels, prompb.Label{
-				Name:  name,
-				Value: value,
-			})
-		}
-
-		timeseries = append(timeseries, ts)
+		port = 9090
 	}
 
-	// Create WriteRequest
+	// Apply metric relabeling before building timeseries
+	metrics = applyMetricRelabelings(metrics, metricAccess.Spec.RemoteWrite.MetricRelabelings)
+
+	timeseries := buildTimeseries(metrics, metricAccess)
+
 	req := &prompb.WriteRequest{
 		Timeseries: timeseries,
 	}
-
-	// Marshal and compress
 	data, err := proto.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
 	compressed := snappy.Encode(nil, data)
 
-	// Create HTTP request
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(compressed))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers
-	httpReq.Header.Set("Content-Type", "application/x-protobuf")
-	httpReq.Header.Set("Content-Encoding", "snappy")
-	httpReq.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
-
-	// Send request with retries
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	var lastErr error
-	for retries := 0; retries < 3; retries++ {
-		resp, err := client.Do(httpReq)
-		if err != nil {
-			lastErr = fmt.Errorf("failed to send request: %w", err)
-			logrus.WithFields(logrus.Fields{
-				"url":     url,
-				"retry":   retries + 1,
-				"error":   err,
-			}).Warning("DIAGNOSTIC: Remote write request failed, retrying")
-			time.Sleep(time.Second * time.Duration(retries+1))
-			continue
+	// Build target URLs: if Replicas > 0 and StatefulSetName is set, write to each pod
+	var urls []string
+	if target.Replicas > 0 && target.StatefulSetName != "" {
+		for i := int32(0); i < target.Replicas; i++ {
+			podURL := fmt.Sprintf("http://%s-%d.%s.%s.svc.cluster.local:%d/api/v1/write",
+				target.StatefulSetName, i, target.ServiceName,
+				metricAccess.Namespace, port)
+			urls = append(urls, podURL)
 		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode/100 != 2 {
-			body, _ := io.ReadAll(resp.Body)
-			lastErr = fmt.Errorf("remote write failed with status %d: %s", resp.StatusCode, string(body))
-			logrus.WithFields(logrus.Fields{
-				"url":        url,
-				"status":     resp.StatusCode,
-				"response":   string(body),
-				"retry":      retries + 1,
-			}).Warning("DIAGNOSTIC: Remote write response error, retrying")
-			time.Sleep(time.Second * time.Duration(retries+1))
-			continue
-		}
-
-		// Success
 		logrus.WithFields(logrus.Fields{
-			"url":           url,
-			"namespace":     metricAccess.Namespace,
-			"service":       target.ServiceName,
-			"metric_count": len(metrics),
-			"status":        resp.StatusCode,
-		}).Info("DIAGNOSTIC: Successfully sent metrics via remote write")
-		return nil
+			"namespace":       metricAccess.Namespace,
+			"replicas":        target.Replicas,
+			"statefulset":     target.StatefulSetName,
+			"target_count":    len(urls),
+		}).Info("Sending metrics to multiple Prometheus replicas")
+	} else {
+		svcURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d/api/v1/write",
+			target.ServiceName, metricAccess.Namespace, port)
+		urls = append(urls, svcURL)
+	}
+
+	// Send to all target URLs concurrently
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(urls))
+
+	for _, targetURL := range urls {
+		wg.Add(1)
+		go func(u string) {
+			defer wg.Done()
+			if err := sendRemoteWrite(ctx, u, compressed, len(metrics)); err != nil {
+				errCh <- fmt.Errorf("%s: %w", u, err)
+			}
+		}(targetURL)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errs []string
+	for err := range errCh {
+		errs = append(errs, err.Error())
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("remote write failures: %s", strings.Join(errs, "; "))
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"url":           url,
 		"namespace":     metricAccess.Namespace,
-		"service":       target.ServiceName,
 		"metric_count":  len(metrics),
-		"final_error":   lastErr,
-	}).Error("DIAGNOSTIC: Failed to send metrics after all retries")
-
-	return fmt.Errorf("failed to send metrics after retries: %w", lastErr)
+		"targets":       len(urls),
+	}).Info("Successfully sent metrics via remote write to all targets")
+	return nil
 }
 
 // PushgatewayCollector sends metrics to a Pushgateway instance
@@ -239,11 +164,237 @@ func NewRemoteWriteCollector(client client.Client) Collector {
 
 // Send implements the Collector interface for remote write targets
 func (c *RemoteWriteCollector) Send(ctx context.Context, metricAccess *v1alpha1.MetricAccess, metrics []Metric) error {
-	// Implementation would:
-	// 1. Convert metrics to Prometheus remote write format
-	// 2. Send to the specified remote write endpoint
-	// 3. Handle authentication, headers, and retries
-	
-	// Placeholder implementation
+	endpoint := metricAccess.Spec.RemoteWrite.RemoteWrite
+	if endpoint == nil {
+		return fmt.Errorf("remote write endpoint configuration is missing")
+	}
+
+	metrics = applyMetricRelabelings(metrics, metricAccess.Spec.RemoteWrite.MetricRelabelings)
+
+	timeseries := buildTimeseries(metrics, metricAccess)
+
+	req := &prompb.WriteRequest{
+		Timeseries: timeseries,
+	}
+	data, err := proto.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metrics: %w", err)
+	}
+	compressed := snappy.Encode(nil, data)
+
+	if err := sendRemoteWrite(ctx, endpoint.URL, compressed, len(metrics)); err != nil {
+		return fmt.Errorf("remote write to %s failed: %w", endpoint.URL, err)
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"url":          endpoint.URL,
+		"namespace":    metricAccess.Namespace,
+		"metric_count": len(metrics),
+	}).Info("Successfully sent metrics to remote write endpoint")
 	return nil
+}
+
+// buildTimeseries converts Metric slice to prompb.TimeSeries applying extraLabels.
+func buildTimeseries(metrics []Metric, metricAccess *v1alpha1.MetricAccess) []prompb.TimeSeries {
+	var timeseries []prompb.TimeSeries
+	for _, m := range metrics {
+		ts := prompb.TimeSeries{
+			Labels: make([]prompb.Label, 0, len(m.Labels)+1),
+			Samples: []prompb.Sample{{
+				Value:     m.Value,
+				Timestamp: m.Timestamp.UnixNano() / int64(time.Millisecond),
+			}},
+		}
+
+		ts.Labels = append(ts.Labels, prompb.Label{
+			Name:  "__name__",
+			Value: m.Name,
+		})
+
+		labelMap := make(map[string]string)
+		for name, value := range m.Labels {
+			labelMap[string(name)] = string(value)
+		}
+
+		if metricAccess.Spec.RemoteWrite.ExtraLabels != nil {
+			honorLabels := metricAccess.Spec.RemoteWrite.HonorLabels
+			for name, value := range metricAccess.Spec.RemoteWrite.ExtraLabels {
+				if _, exists := labelMap[name]; exists && honorLabels {
+					continue
+				}
+				labelMap[name] = value
+			}
+		}
+
+		for name, value := range labelMap {
+			ts.Labels = append(ts.Labels, prompb.Label{
+				Name:  name,
+				Value: value,
+			})
+		}
+
+		timeseries = append(timeseries, ts)
+	}
+	return timeseries
+}
+
+// sendRemoteWrite sends a compressed protobuf payload to a remote write URL with retries.
+func sendRemoteWrite(ctx context.Context, targetURL string, compressed []byte, metricCount int) error {
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	var lastErr error
+
+	for retries := 0; retries < 3; retries++ {
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(compressed))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/x-protobuf")
+		httpReq.Header.Set("Content-Encoding", "snappy")
+		httpReq.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
+
+		resp, err := httpClient.Do(httpReq)
+		if err != nil {
+			lastErr = fmt.Errorf("request failed: %w", err)
+			logrus.WithFields(logrus.Fields{
+				"url":   targetURL,
+				"retry": retries + 1,
+				"error": err,
+			}).Warning("Remote write request failed, retrying")
+			time.Sleep(time.Second * time.Duration(retries+1))
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode/100 != 2 {
+			body, _ := io.ReadAll(resp.Body)
+			lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+			logrus.WithFields(logrus.Fields{
+				"url":      targetURL,
+				"status":   resp.StatusCode,
+				"response": string(body),
+				"retry":    retries + 1,
+			}).Warning("Remote write response error, retrying")
+			time.Sleep(time.Second * time.Duration(retries+1))
+			continue
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf("failed after retries: %w", lastErr)
+}
+
+// applyMetricRelabelings applies MetricRelabelConfig rules to a set of metrics.
+// Supports actions: replace (default), keep, drop, labeldrop, labelkeep.
+func applyMetricRelabelings(metrics []Metric, rules []v1alpha1.MetricRelabelConfig) []Metric {
+	if len(rules) == 0 {
+		return metrics
+	}
+
+	var result []Metric
+	for _, m := range metrics {
+		labels := make(map[string]string)
+		labels["__name__"] = m.Name
+		for k, v := range m.Labels {
+			labels[string(k)] = string(v)
+		}
+
+		keep := true
+		for _, rule := range rules {
+			action := rule.Action
+			if action == "" {
+				action = "replace"
+			}
+
+			separator := rule.Separator
+			if separator == "" {
+				separator = ";"
+			}
+
+			// Concatenate source label values
+			var sourceValues []string
+			for _, sl := range rule.SourceLabels {
+				sourceValues = append(sourceValues, labels[sl])
+			}
+			concatenated := strings.Join(sourceValues, separator)
+
+			regexStr := rule.Regex
+			if regexStr == "" {
+				regexStr = "(.*)"
+			}
+			re, err := regexp.Compile("^(?:" + regexStr + ")$")
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"regex": regexStr,
+					"error": err,
+				}).Warning("Invalid relabeling regex, skipping rule")
+				continue
+			}
+
+			switch action {
+			case "replace":
+				if re.MatchString(concatenated) {
+					replacement := rule.Replacement
+					if replacement == "" {
+						replacement = "$1"
+					}
+					newValue := re.ReplaceAllString(concatenated, replacement)
+					if rule.TargetLabel != "" {
+						labels[rule.TargetLabel] = newValue
+					}
+				}
+			case "keep":
+				if !re.MatchString(concatenated) {
+					keep = false
+				}
+			case "drop":
+				if re.MatchString(concatenated) {
+					keep = false
+				}
+			case "labeldrop":
+				for lk := range labels {
+					if re.MatchString(lk) {
+						delete(labels, lk)
+					}
+				}
+			case "labelkeep":
+				for lk := range labels {
+					if !re.MatchString(lk) && lk != "__name__" {
+						delete(labels, lk)
+					}
+				}
+			}
+
+			if !keep {
+				break
+			}
+		}
+
+		if !keep {
+			continue
+		}
+
+		newMetric := Metric{
+			Name:      labels["__name__"],
+			Value:     m.Value,
+			Timestamp: m.Timestamp,
+			Labels:    model.LabelSet{},
+		}
+		for k, v := range labels {
+			if k != "__name__" {
+				newMetric.Labels[model.LabelName(k)] = model.LabelValue(v)
+			}
+		}
+		result = append(result, newMetric)
+	}
+
+	if len(result) != len(metrics) {
+		logrus.WithFields(logrus.Fields{
+			"original_count":  len(metrics),
+			"relabeled_count": len(result),
+			"rules_applied":   len(rules),
+		}).Info("Metric relabeling filtered metrics")
+	}
+
+	return result
 } 

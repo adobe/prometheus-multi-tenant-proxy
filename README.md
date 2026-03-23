@@ -13,6 +13,7 @@ A sophisticated, production-ready Go application that provides secure multi-tena
 
 ### 🏢 Multi-Tenant Architecture
 - **Custom Resource Definitions**: Uses `MetricAccess` CRDs to define tenant access rules
+- **Multiple CRs Per Namespace**: Supports multiple `MetricAccess` CRs in the same namespace, each with distinct metric sets and configurations
 - **Flexible Metric Patterns**: Support for exact matches, regex patterns, and PromQL-style selectors
 - **Namespace Isolation**: Tenant isolation based on Kubernetes namespaces
 - **Per-Tenant Metric Isolation**: Optional namespace-level filtering at collection time for enhanced security
@@ -21,9 +22,11 @@ A sophisticated, production-ready Go application that provides secure multi-tena
 
 ### 📊 Remote Write Functionality
 - **Automated Metric Collection**: Pulls metrics from infrastructure Prometheus and pushes to tenant instances
+- **Multi-Replica Write**: Native support for writing to all Prometheus StatefulSet replicas via direct pod DNS
+- **Metric Relabeling**: Per-metric conditional label manipulation (e.g., adding `metrics_path` based on metric name patterns), mirroring Prometheus `metricRelabelings`
 - **Multiple Target Types**: Support for Prometheus, Pushgateway, and external remote write endpoints
 - **Configurable Intervals**: Per-tenant collection intervals (5s to hours)
-- **Extra Labels**: Automatic addition of tenant and management labels
+- **Extra Labels**: Automatic addition of tenant and management labels with `honorLabels` support
 - **Error Handling**: Comprehensive retry logic and error reporting
 
 ### 🚦 Advanced Proxy Features
@@ -131,11 +134,25 @@ spec:
     target:
       type: "prometheus"
     prometheus:
-      serviceName: "prometheus"
+      serviceName: "prometheus-operated"
       servicePort: 9090
+      # Write to all HA replicas via direct pod DNS
+      replicas: 2
+      statefulSetName: "prometheus-my-app"
     extraLabels:
       tenant: "my-app-namespace"
       managed_by: "multi-tenant-proxy"
+    honorLabels: true
+    # Conditional label manipulation (mirrors Prometheus metricRelabelings)
+    metricRelabelings:
+      - sourceLabels: [__name__]
+        regex: "container_(.*)"
+        targetLabel: metrics_path
+        replacement: "/metrics/cadvisor"
+      - sourceLabels: [__name__]
+        regex: "kubelet_(.*)"
+        targetLabel: metrics_path
+        replacement: "/metrics"
 ```
 
 ```bash
@@ -254,13 +271,21 @@ spec:
     target:
       type: "prometheus"  # or "pushgateway", "remote_write"
     prometheus:
-      serviceName: "prometheus"
+      serviceName: "prometheus-operated"
       servicePort: 9090
+      replicas: 2                                          # Write to all HA replicas
+      statefulSetName: "prometheus-tenant-prometheus"       # StatefulSet for pod DNS
     extraLabels:
       tenant: "tenant-namespace"
       managed_by: "multi-tenant-proxy"
       environment: "production"
     honorLabels: true
+    # Per-metric relabeling (optional)
+    metricRelabelings:
+      - sourceLabels: [__name__]
+        regex: "container_(.*)"
+        targetLabel: metrics_path
+        replacement: "/metrics/cadvisor"
 ```
 
 ## 📊 Remote Write Feature
@@ -276,7 +301,7 @@ The remote write functionality automatically collects metrics from infrastructur
 
 ### Remote Write Target Types
 
-#### 1. Prometheus Target
+#### 1. Prometheus Target (Single Replica)
 ```yaml
 remoteWrite:
   enabled: true
@@ -290,7 +315,25 @@ remoteWrite:
     tenant: "my-team"
 ```
 
-#### 2. Pushgateway Target
+#### 2. Prometheus Target (Multi-Replica HA)
+```yaml
+remoteWrite:
+  enabled: true
+  interval: "30s"
+  target:
+    type: "prometheus"
+  prometheus:
+    serviceName: "prometheus-operated"
+    servicePort: 9090
+    replicas: 2
+    statefulSetName: "prometheus-my-prom"
+  extraLabels:
+    tenant: "my-team"
+```
+
+When `replicas` and `statefulSetName` are set, the proxy resolves individual pod DNS names (e.g., `prometheus-my-prom-0.prometheus-operated.ns.svc.cluster.local:9090`) and writes to all replicas concurrently, ensuring all HA instances receive identical data.
+
+#### 3. Pushgateway Target
 ```yaml
 remoteWrite:
   enabled: true
@@ -303,7 +346,7 @@ remoteWrite:
     jobName: "remote-write-metrics"
 ```
 
-#### 3. External Remote Write Endpoint
+#### 4. External Remote Write Endpoint
 ```yaml
 remoteWrite:
   enabled: true
@@ -319,6 +362,90 @@ remoteWrite:
         key: "password"
     headers:
       X-Tenant: "my-team"
+```
+
+### Metric Relabeling
+
+The `metricRelabelings` field allows conditional label manipulation on metrics before they are sent via remote write. This mirrors Prometheus `metricRelabelings` and supports actions: `replace` (default), `keep`, `drop`, `labeldrop`, `labelkeep`.
+
+```yaml
+remoteWrite:
+  enabled: true
+  interval: "30s"
+  target:
+    type: "prometheus"
+  prometheus:
+    serviceName: "prometheus-operated"
+    servicePort: 9090
+  metricRelabelings:
+    # Add metrics_path=/metrics/cadvisor for container_* metrics
+    - sourceLabels: [__name__]
+      regex: "container_(.*)"
+      targetLabel: metrics_path
+      replacement: "/metrics/cadvisor"
+    # Add metrics_path=/metrics for kubelet_* metrics
+    - sourceLabels: [__name__]
+      regex: "kubelet_(.*)"
+      targetLabel: metrics_path
+      replacement: "/metrics"
+    # Drop high-cardinality metrics
+    - sourceLabels: [__name__]
+      regex: "etcd_debugging_.*"
+      action: drop
+```
+
+### Multiple MetricAccess CRs Per Namespace
+
+Multiple `MetricAccess` CRs can coexist in the same namespace. Each CR defines its own metric set, remote write target, and relabeling rules. The proxy handles them independently for remote write and merges their access patterns for proxy queries.
+
+```yaml
+# CR 1: Container metrics with cadvisor path label
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: enm-container-metrics
+  namespace: my-namespace
+spec:
+  source: my-namespace
+  metricIsolation: true
+  metrics:
+    - "container_cpu_usage_seconds_total"
+    - "container_memory_working_set_bytes"
+  remoteWrite:
+    enabled: true
+    interval: "30s"
+    target:
+      type: "prometheus"
+    prometheus:
+      serviceName: "prometheus-operated"
+      servicePort: 9090
+    extraLabels:
+      metrics_path: "/metrics/cadvisor"
+    honorLabels: true
+---
+# CR 2: Kubelet metrics with /metrics path label
+apiVersion: observability.ethos.io/v1alpha1
+kind: MetricAccess
+metadata:
+  name: enm-kubelet-metrics
+  namespace: my-namespace
+spec:
+  source: my-namespace
+  metricIsolation: true
+  metrics:
+    - "kubelet_running_pods"
+    - "kubelet_node_name"
+  remoteWrite:
+    enabled: true
+    interval: "30s"
+    target:
+      type: "prometheus"
+    prometheus:
+      serviceName: "prometheus-operated"
+      servicePort: 9090
+    extraLabels:
+      metrics_path: "/metrics"
+    honorLabels: true
 ```
 
 ### Tenant Prometheus Configuration
@@ -718,6 +845,9 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - [x] ✅ Remote write functionality
 - [x] ✅ Dynamic service discovery
 - [x] ✅ Kubernetes CRD support
+- [x] ✅ Multiple MetricAccess CRs per namespace
+- [x] ✅ Multi-replica write support (StatefulSet pod targeting)
+- [x] ✅ Per-metric relabeling (metricRelabelings)
 - [ ] 🔄 Advanced query rewriting
 - [ ] 🔄 Multi-cluster support
 - [ ] 🔄 Grafana integration

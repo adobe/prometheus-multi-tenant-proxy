@@ -610,7 +610,7 @@ func (h *Handler) extractTenantInfo(r *http.Request) (*tenant.TenantInfo, error)
 	// 1. From X-Tenant-Namespace header
 	namespace := r.Header.Get("X-Tenant-Namespace")
 	if namespace != "" {
-		return h.tenantManager.GetTenant(namespace)
+		return h.mergedTenantForNamespace(namespace)
 	}
 	
 	// 2. From Authorization header (if auth is configured)
@@ -621,7 +621,7 @@ func (h *Handler) extractTenantInfo(r *http.Request) (*tenant.TenantInfo, error)
 	// 3. From query parameter
 	namespace = r.URL.Query().Get("namespace")
 	if namespace != "" {
-		return h.tenantManager.GetTenant(namespace)
+		return h.mergedTenantForNamespace(namespace)
 	}
 	
 	return nil, fmt.Errorf("no tenant information found in request")
@@ -643,7 +643,46 @@ func (h *Handler) extractTenantFromAuth(r *http.Request) (*tenant.TenantInfo, er
 		return nil, fmt.Errorf("missing tenant namespace")
 	}
 	
-	return h.tenantManager.GetTenant(namespace)
+	return h.mergedTenantForNamespace(namespace)
+}
+
+// mergedTenantForNamespace returns a single TenantInfo that combines all MetricAccess
+// CRs in the given namespace. This allows multiple CRs per namespace to each contribute
+// their metric patterns, enabling a single proxy query to validate against all of them.
+func (h *Handler) mergedTenantForNamespace(namespace string) (*tenant.TenantInfo, error) {
+	tenants := h.tenantManager.GetTenantsByNamespace(namespace)
+	if len(tenants) == 0 {
+		return nil, fmt.Errorf("no tenants found for namespace: %s", namespace)
+	}
+	
+	if len(tenants) == 1 {
+		return tenants[0], nil
+	}
+	
+	// Merge all tenants into a combined view
+	merged := &tenant.TenantInfo{
+		ID:             fmt.Sprintf("merged/%s", namespace),
+		Name:           fmt.Sprintf("merged-%s", namespace),
+		Namespace:      namespace,
+		Source:         tenants[0].Source,
+		LabelSelectors: make(map[string]string),
+		LastUpdated:    tenants[0].LastUpdated,
+	}
+	
+	for _, t := range tenants {
+		merged.MetricPatterns = append(merged.MetricPatterns, t.MetricPatterns...)
+		if t.LastUpdated.After(merged.LastUpdated) {
+			merged.LastUpdated = t.LastUpdated
+		}
+	}
+	
+	logrus.WithFields(logrus.Fields{
+		"namespace":     namespace,
+		"tenant_count":  len(tenants),
+		"total_patterns": len(merged.MetricPatterns),
+	}).Debug("Merged multiple tenants for namespace")
+	
+	return merged, nil
 }
 
 // modifyResponse modifies the response based on tenant access rules

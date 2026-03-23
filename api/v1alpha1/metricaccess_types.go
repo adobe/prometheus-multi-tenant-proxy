@@ -55,6 +55,11 @@ type RemoteWriteConfig struct {
 
 	// Honor labels from the source metrics
 	HonorLabels bool `json:"honorLabels,omitempty"`
+
+	// Metric relabeling rules applied to metrics before sending.
+	// Supports per-metric conditional label manipulation (e.g., adding metrics_path
+	// based on metric name patterns). Mirrors Prometheus metricRelabelings.
+	MetricRelabelings []MetricRelabelConfig `json:"metricRelabelings,omitempty"`
 }
 
 // RemoteWriteTarget defines where metrics should be sent via remote write
@@ -79,6 +84,15 @@ type PrometheusTarget struct {
 
 	// Service port (default: 9090)
 	ServicePort int32 `json:"servicePort,omitempty"`
+
+	// Number of Prometheus StatefulSet replicas to write to.
+	// When > 0, the proxy resolves individual pod DNS names and writes to all replicas.
+	// This ensures all HA replicas receive identical metrics.
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// StatefulSet name for direct pod DNS targeting (e.g., "prometheus-enm-promoperator-prometheus").
+	// Used with Replicas to construct pod DNS: {statefulSetName}-{N}.{serviceName}.{namespace}.svc.cluster.local
+	StatefulSetName string `json:"statefulSetName,omitempty"`
 }
 
 // PushgatewayTarget defines a Pushgateway target
@@ -103,6 +117,28 @@ type RemoteWriteEndpoint struct {
 
 	// Optional headers
 	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// MetricRelabelConfig defines a metric relabeling rule applied to remote-written metrics.
+// Mirrors Prometheus relabel_config to allow conditional label manipulation.
+type MetricRelabelConfig struct {
+	// Source labels to use for matching
+	SourceLabels []string `json:"sourceLabels,omitempty"`
+
+	// Separator for concatenating source label values (default: ";")
+	Separator string `json:"separator,omitempty"`
+
+	// Regex to match against the concatenated source label values
+	Regex string `json:"regex,omitempty"`
+
+	// Target label to set
+	TargetLabel string `json:"targetLabel,omitempty"`
+
+	// Replacement value (supports $1 capture group references)
+	Replacement string `json:"replacement,omitempty"`
+
+	// Action to perform: replace, keep, drop, labeldrop, labelkeep (default: "replace")
+	Action string `json:"action,omitempty"`
 }
 
 // BasicAuth defines basic authentication credentials

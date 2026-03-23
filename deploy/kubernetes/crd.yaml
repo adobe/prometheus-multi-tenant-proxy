@@ -77,6 +77,40 @@ spec:
                   honorLabels:
                     description: Honor labels from the source metrics
                     type: boolean
+                  metricRelabelings:
+                    description: |-
+                      Metric relabeling rules applied to metrics before sending.
+                      Supports per-metric conditional label manipulation.
+                    items:
+                      description: MetricRelabelConfig defines a metric relabeling
+                        rule applied to remote-written metrics.
+                      properties:
+                        action:
+                          description: 'Action to perform: replace, keep, drop, labeldrop,
+                            labelkeep (default: "replace")'
+                          type: string
+                        regex:
+                          description: Regex to match against the concatenated source
+                            label values
+                          type: string
+                        replacement:
+                          description: Replacement value (supports $1 capture group
+                            references)
+                          type: string
+                        separator:
+                          description: 'Separator for concatenating source label values
+                            (default: ";")'
+                          type: string
+                        sourceLabels:
+                          description: Source labels to use for matching
+                          items:
+                            type: string
+                          type: array
+                        targetLabel:
+                          description: Target label to set
+                          type: string
+                      type: object
+                    type: array
                   interval:
                     description: Collection interval (e.g., "30s", "1m")
                     type: string
@@ -84,6 +118,12 @@ spec:
                     description: Prometheus target configuration (at same level as
                       target for CRD compatibility)
                     properties:
+                      replicas:
+                        description: |-
+                          Number of Prometheus StatefulSet replicas to write to.
+                          When > 0, the proxy resolves individual pod DNS names and writes to all replicas.
+                        format: int32
+                        type: integer
                       serviceName:
                         description: Service name in the tenant namespace
                         type: string
@@ -91,6 +131,11 @@ spec:
                         description: 'Service port (default: 9090)'
                         format: int32
                         type: integer
+                      statefulSetName:
+                        description: |-
+                          StatefulSet name for direct pod DNS targeting.
+                          Used with replicas to construct pod DNS: {statefulSetName}-{N}.{serviceName}.{namespace}.svc.cluster.local
+                        type: string
                     required:
                     - serviceName
                     type: object
@@ -156,6 +201,12 @@ spec:
                       prometheus:
                         description: Prometheus target configuration
                         properties:
+                          replicas:
+                            description: |-
+                              Number of Prometheus StatefulSet replicas to write to.
+                              When > 0, the proxy resolves individual pod DNS names and writes to all replicas.
+                            format: int32
+                            type: integer
                           serviceName:
                             description: Service name in the tenant namespace
                             type: string
@@ -163,6 +214,11 @@ spec:
                             description: 'Service port (default: 9090)'
                             format: int32
                             type: integer
+                          statefulSetName:
+                            description: |-
+                              StatefulSet name for direct pod DNS targeting.
+                              Used with replicas to construct pod DNS: {statefulSetName}-{N}.{serviceName}.{namespace}.svc.cluster.local
+                            type: string
                         required:
                         - serviceName
                         type: object

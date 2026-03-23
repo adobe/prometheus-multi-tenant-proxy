@@ -68,8 +68,11 @@ type Manager interface {
 	// Start begins watching for tenant changes
 	Start(ctx context.Context) error
 	
-	// GetTenant returns tenant information by namespace
-	GetTenant(namespace string) (*TenantInfo, error)
+	// GetTenant returns tenant information by ID (namespace/name)
+	GetTenant(tenantID string) (*TenantInfo, error)
+	
+	// GetTenantsByNamespace returns all tenants for a namespace
+	GetTenantsByNamespace(namespace string) []*TenantInfo
 	
 	// GetAllTenants returns all known tenants
 	GetAllTenants() map[string]*TenantInfo
@@ -85,7 +88,7 @@ type manager struct {
 	
 	// Current tenants
 	mu      sync.RWMutex
-	tenants map[string]*TenantInfo // namespace -> TenantInfo
+	tenants map[string]*TenantInfo // namespace/name -> TenantInfo
 }
 
 // NewManager creates a new tenant manager
@@ -124,17 +127,31 @@ func (m *manager) Start(ctx context.Context) error {
 	}
 }
 
-// GetTenant returns tenant information by namespace
-func (m *manager) GetTenant(namespace string) (*TenantInfo, error) {
+// GetTenant returns tenant information by ID (namespace/name)
+func (m *manager) GetTenant(tenantID string) (*TenantInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	
-	tenant, exists := m.tenants[namespace]
+	tenant, exists := m.tenants[tenantID]
 	if !exists {
-		return nil, fmt.Errorf("tenant not found for namespace: %s", namespace)
+		return nil, fmt.Errorf("tenant not found: %s", tenantID)
 	}
 	
 	return tenant, nil
+}
+
+// GetTenantsByNamespace returns all tenants for a given namespace
+func (m *manager) GetTenantsByNamespace(namespace string) []*TenantInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	var tenants []*TenantInfo
+	for _, t := range m.tenants {
+		if t.Namespace == namespace {
+			tenants = append(tenants, t)
+		}
+	}
+	return tenants
 }
 
 // GetAllTenants returns all known tenants
@@ -219,8 +236,9 @@ func (m *manager) processTenantUpdate(metricAccess *v1alpha1.MetricAccess) error
 		return fmt.Errorf("failed to convert MetricAccess to TenantInfo: %w", err)
 	}
 	
+	key := fmt.Sprintf("%s/%s", metricAccess.Namespace, metricAccess.Name)
 	m.mu.Lock()
-	m.tenants[metricAccess.Namespace] = tenantInfo
+	m.tenants[key] = tenantInfo
 	m.mu.Unlock()
 	
 	logrus.Infof("Updated tenant: %s (namespace: %s)", tenantInfo.ID, tenantInfo.Namespace)

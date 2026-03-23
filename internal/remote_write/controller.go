@@ -340,6 +340,28 @@ func (c *Controller) hasConfigurationChanged(oldMA, newMA *v1alpha1.MetricAccess
 			}).Info("DIAGNOSTIC: extraLabels configuration changed")
 			return true
 		}
+		
+		// Check metricRelabelings
+		if len(oldMA.Spec.RemoteWrite.MetricRelabelings) != len(newMA.Spec.RemoteWrite.MetricRelabelings) {
+			logrus.WithFields(logrus.Fields{
+				"namespace": newMA.Namespace,
+				"name":     newMA.Name,
+			}).Info("DIAGNOSTIC: metricRelabelings count changed")
+			return true
+		}
+		
+		// Check prometheus target replicas/statefulset changes
+		if oldMA.Spec.RemoteWrite.Prometheus != nil && newMA.Spec.RemoteWrite.Prometheus != nil {
+			oldP := oldMA.Spec.RemoteWrite.Prometheus
+			newP := newMA.Spec.RemoteWrite.Prometheus
+			if oldP.Replicas != newP.Replicas || oldP.StatefulSetName != newP.StatefulSetName {
+				logrus.WithFields(logrus.Fields{
+					"namespace": newMA.Namespace,
+					"name":     newMA.Name,
+				}).Info("DIAGNOSTIC: prometheus target replica config changed")
+				return true
+			}
+		}
 	}
 	
 	return false

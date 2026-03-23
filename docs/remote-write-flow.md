@@ -114,21 +114,26 @@ For each collection cycle:
 3. **Result Aggregation**: Combines metrics from all healthy targets
 4. **Filtering**: Applies tenant-specific access rules to collected metrics
 
-### 4. Metric Enrichment
+### 4. Metric Enrichment & Relabeling
 
-Before forwarding, metrics are enriched with:
+Before forwarding, metrics are processed:
+- **Metric Relabeling**: `metricRelabelings` rules are applied first, enabling conditional label manipulation (e.g., adding `metrics_path` based on `__name__` patterns)
 - **Tenant Labels**: Added from `extraLabels` configuration
 - **Management Labels**: Automatic labels like `managed_by: "multi-tenant-proxy"`
 - **Original Labels**: Preserved from source metrics (if `honorLabels: true`)
+- **Label Conflict Resolution**: When `honorLabels: true`, original metric labels take precedence over `extraLabels`
 
 ### 5. Remote Write Delivery
 
 Metrics are sent to the target using the appropriate collector:
 
 #### Prometheus Target
-- **Endpoint**: `http://<serviceName>.<namespace>.svc.cluster.local:<port>/api/v1/write`
+- **Single Replica**: `http://<serviceName>.<namespace>.svc.cluster.local:<port>/api/v1/write`
+- **Multi-Replica**: When `replicas` and `statefulSetName` are configured, writes to each pod:
+  `http://<statefulSetName>-{0..N}.{serviceName}.{namespace}.svc.cluster.local:{port}/api/v1/write`
 - **Format**: Prometheus remote write protocol (protobuf + snappy compression)
 - **Headers**: `Content-Type: application/x-protobuf`, `Content-Encoding: snappy`
+- **Concurrency**: All replicas are written to concurrently for minimal latency
 
 #### Pushgateway Target
 - **Endpoint**: `http://<serviceName>.<namespace>.svc.cluster.local:<port>/metrics/job/<jobName>`
@@ -169,6 +174,48 @@ remoteWrite:
     jobName: "remote-write-metrics"
   extraLabels:
     tenant: "my-team"
+```
+
+### Multi-Replica Prometheus HA
+```yaml
+remoteWrite:
+  enabled: true
+  interval: "30s"
+  target:
+    type: "prometheus"
+  prometheus:
+    serviceName: "prometheus-operated"
+    servicePort: 9090
+    replicas: 2
+    statefulSetName: "prometheus-enm-promoperator-prometheus"
+  extraLabels:
+    tenant: "my-team"
+    cluster: "ethos11-prod-va7"
+  honorLabels: true
+```
+
+### Per-Metric Relabeling
+```yaml
+remoteWrite:
+  enabled: true
+  interval: "30s"
+  target:
+    type: "prometheus"
+  prometheus:
+    serviceName: "prometheus-operated"
+    servicePort: 9090
+  metricRelabelings:
+    - sourceLabels: [__name__]
+      regex: "container_(.*)"
+      targetLabel: metrics_path
+      replacement: "/metrics/cadvisor"
+    - sourceLabels: [__name__]
+      regex: "kubelet_(.*)"
+      targetLabel: metrics_path
+      replacement: "/metrics"
+  extraLabels:
+    enm_job: "tee-my-namespace"
+  honorLabels: true
 ```
 
 ### External Remote Write
@@ -270,4 +317,8 @@ Key log messages to monitor:
 3. **Label Management**: Use `extraLabels` for tenant identification and management
 4. **Error Handling**: Monitor remote write failures and set up alerting
 5. **Resource Management**: Consider memory and CPU impact of frequent collections
-6. **Security**: Use network policies to restrict access between namespaces 
+6. **Security**: Use network policies to restrict access between namespaces
+7. **Multi-Replica**: Always set `replicas` and `statefulSetName` when using Prometheus HA to ensure all replicas receive metrics
+8. **Metric Relabeling**: Use `metricRelabelings` instead of multiple CRs when you need to add labels conditionally based on metric name patterns
+9. **HonorLabels**: Set `honorLabels: true` when source metrics already carry the correct `job` label to preserve them during remote write
+10. **Multiple CRs**: Use multiple `MetricAccess` CRs per namespace when you need different remote write targets or intervals for different metric groups 
