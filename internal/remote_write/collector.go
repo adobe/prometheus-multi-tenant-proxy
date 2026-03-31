@@ -47,6 +47,42 @@ func NewPrometheusCollector(client client.Client) Collector {
 	}
 }
 
+// resolveTargetNamespace returns the namespace where Prometheus lives.
+// If TargetNamespace is set on the target it takes precedence; otherwise
+// the MetricAccess CR's own namespace is used (single-namespace case).
+func resolveTargetNamespace(target *v1alpha1.PrometheusTarget, crNamespace string) string {
+	if target.TargetNamespace != "" {
+		return target.TargetNamespace
+	}
+	return crNamespace
+}
+
+// buildPrometheusURLs constructs the remote-write endpoint URLs for a Prometheus target.
+// When Replicas > 0 and StatefulSetName is set it fans out to individual pod DNS names
+// (HA multi-replica write). Otherwise it targets the headless service directly.
+func buildPrometheusURLs(target *v1alpha1.PrometheusTarget, targetNS string) []string {
+	port := target.ServicePort
+	if port == 0 {
+		port = 9090
+	}
+
+	var urls []string
+	if target.Replicas > 0 && target.StatefulSetName != "" {
+		for i := int32(0); i < target.Replicas; i++ {
+			urls = append(urls, fmt.Sprintf(
+				"http://%s-%d.%s.%s.svc.cluster.local:%d/api/v1/write",
+				target.StatefulSetName, i, target.ServiceName, targetNS, port,
+			))
+		}
+	} else {
+		urls = append(urls, fmt.Sprintf(
+			"http://%s.%s.svc.cluster.local:%d/api/v1/write",
+			target.ServiceName, targetNS, port,
+		))
+	}
+	return urls
+}
+
 // Send implements the Collector interface for Prometheus targets
 func (c *PrometheusCollector) Send(ctx context.Context, metricAccess *v1alpha1.MetricAccess, metrics []Metric) error {
 	target := metricAccess.Spec.RemoteWrite.Prometheus
@@ -54,10 +90,8 @@ func (c *PrometheusCollector) Send(ctx context.Context, metricAccess *v1alpha1.M
 		return fmt.Errorf("prometheus target configuration is missing")
 	}
 
-	port := target.ServicePort
-	if port == 0 {
-		port = 9090
-	}
+	targetNS := resolveTargetNamespace(target, metricAccess.Namespace)
+	urls := buildPrometheusURLs(target, targetNS)
 
 	// Apply metric relabeling before building timeseries
 	metrics = applyMetricRelabelings(metrics, metricAccess.Spec.RemoteWrite.MetricRelabelings)
@@ -73,26 +107,13 @@ func (c *PrometheusCollector) Send(ctx context.Context, metricAccess *v1alpha1.M
 	}
 	compressed := snappy.Encode(nil, data)
 
-	// Build target URLs: if Replicas > 0 and StatefulSetName is set, write to each pod
-	var urls []string
-	if target.Replicas > 0 && target.StatefulSetName != "" {
-		for i := int32(0); i < target.Replicas; i++ {
-			podURL := fmt.Sprintf("http://%s-%d.%s.%s.svc.cluster.local:%d/api/v1/write",
-				target.StatefulSetName, i, target.ServiceName,
-				metricAccess.Namespace, port)
-			urls = append(urls, podURL)
-		}
-		logrus.WithFields(logrus.Fields{
-			"namespace":       metricAccess.Namespace,
-			"replicas":        target.Replicas,
-			"statefulset":     target.StatefulSetName,
-			"target_count":    len(urls),
-		}).Info("Sending metrics to multiple Prometheus replicas")
-	} else {
-		svcURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d/api/v1/write",
-			target.ServiceName, metricAccess.Namespace, port)
-		urls = append(urls, svcURL)
-	}
+	logrus.WithFields(logrus.Fields{
+		"namespace":        metricAccess.Namespace,
+		"target_namespace": targetNS,
+		"replicas":         target.Replicas,
+		"statefulset":      target.StatefulSetName,
+		"target_count":     len(urls),
+	}).Info("Sending metrics to Prometheus")
 
 	// Send to all target URLs concurrently
 	var wg sync.WaitGroup

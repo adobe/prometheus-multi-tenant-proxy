@@ -136,6 +136,13 @@ spec:
                           StatefulSet name for direct pod DNS targeting.
                           Used with replicas to construct pod DNS: {statefulSetName}-{N}.{serviceName}.{namespace}.svc.cluster.local
                         type: string
+                      targetNamespace:
+                        description: |-
+                          Namespace where the Prometheus instance lives.
+                          Defaults to the MetricAccess CR's own namespace if not set.
+                          Use this for multi-namespace eNM setups where Prometheus lives in a different
+                          namespace than the MetricAccess CR (e.g., secondary monitored namespaces).
+                        type: string
                     required:
                     - serviceName
                     type: object
@@ -218,6 +225,13 @@ spec:
                             description: |-
                               StatefulSet name for direct pod DNS targeting.
                               Used with replicas to construct pod DNS: {statefulSetName}-{N}.{serviceName}.{namespace}.svc.cluster.local
+                            type: string
+                          targetNamespace:
+                            description: |-
+                              Namespace where the Prometheus instance lives.
+                              Defaults to the MetricAccess CR's own namespace if not set.
+                              Use this for multi-namespace eNM setups where Prometheus lives in a different
+                              namespace than the MetricAccess CR (e.g., secondary monitored namespaces).
                             type: string
                         required:
                         - serviceName

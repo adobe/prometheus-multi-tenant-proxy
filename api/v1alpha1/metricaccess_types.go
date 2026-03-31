@@ -93,6 +93,12 @@ type PrometheusTarget struct {
 	// StatefulSet name for direct pod DNS targeting (e.g., "prometheus-enm-promoperator-prometheus").
 	// Used with Replicas to construct pod DNS: {statefulSetName}-{N}.{serviceName}.{namespace}.svc.cluster.local
 	StatefulSetName string `json:"statefulSetName,omitempty"`
+
+	// TargetNamespace is the namespace where the Prometheus instance lives.
+	// Defaults to the MetricAccess CR's own namespace if not set.
+	// Use this for multi-namespace eNM setups where Prometheus lives in a different namespace
+	// than the MetricAccess CR (e.g., secondary monitored namespaces).
+	TargetNamespace string `json:"targetNamespace,omitempty"`
 }
 
 // PushgatewayTarget defines a Pushgateway target
