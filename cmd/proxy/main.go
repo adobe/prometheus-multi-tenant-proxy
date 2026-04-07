@@ -10,27 +10,33 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/prometheus-multi-tenant-proxy/internal/config"
-	"github.com/prometheus-multi-tenant-proxy/internal/proxy"
-	"github.com/prometheus-multi-tenant-proxy/internal/discovery"
-	"github.com/prometheus-multi-tenant-proxy/internal/tenant"
-	"github.com/prometheus-multi-tenant-proxy/internal/remote_write"
 	"github.com/prometheus-multi-tenant-proxy/api/v1alpha1"
+	"github.com/prometheus-multi-tenant-proxy/internal/config"
+	"github.com/prometheus-multi-tenant-proxy/internal/discovery"
+	"github.com/prometheus-multi-tenant-proxy/internal/proxy"
+	remote_write "github.com/prometheus-multi-tenant-proxy/internal/remote_write"
+	"github.com/prometheus-multi-tenant-proxy/internal/tenant"
 	"github.com/sirupsen/logrus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var (
-	configFile = flag.String("config", "/etc/prometheus-proxy/config.yaml", "Path to configuration file")
-	port       = flag.Int("port", 8080, "Port to listen on")
-	logLevel   = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
-	kubeconfig = flag.String("kubeconfig", "", "Path to kubeconfig file (optional, uses in-cluster config if not provided)")
+	configFile                  = flag.String("config", "/etc/prometheus-proxy/config.yaml", "Path to configuration file")
+	port                        = flag.Int("port", 8080, "Port to listen on")
+	logLevel                    = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+	kubeconfig                  = flag.String("kubeconfig", "", "Path to kubeconfig file (optional, uses in-cluster config if not provided)")
+	leaderElect                 = flag.Bool("leader-elect", true, "Enable leader election for the remote write controller. Must be true when running multiple replicas to avoid duplicate writes.")
+	leaderElectionID            = flag.String("leader-election-id", "prometheus-multi-tenant-proxy-remote-write", "Name of the Lease object used for leader election")
+	leaderElectionNamespace     = flag.String("leader-election-namespace", "", "Namespace for the leader election Lease (defaults to POD_NAMESPACE env var, then 'monitoring')")
 )
 
 func main() {
@@ -127,21 +133,74 @@ func main() {
 		}
 	}()
 
-	// Start remote write
-	if remoteWriteController != nil {
-		go func() {
-			if enableRemoteWrite {
-				// Wait a bit for service discovery to find initial targets
-				logrus.Info("Remote write controller waiting for service discovery to initialize...")
-				time.Sleep(10 * time.Second)
-				logrus.Info("Starting remote write controller")
-				if err := remoteWriteController.Start(ctx); err != nil {
-					logrus.Errorf("Remote write controller error: %v", err)
-				}
-			} else {
-				logrus.Info("Remote write controller is created but not started (feature disabled in config)")
+	// Start remote write controller — always via leader election when enabled so
+	// that only one replica writes at a time, preventing duplicate-write artifacts.
+	if remoteWriteController != nil && enableRemoteWrite {
+		// Resolve leader election namespace: flag > env > default.
+		leNS := *leaderElectionNamespace
+		if leNS == "" {
+			leNS = os.Getenv("POD_NAMESPACE")
+		}
+		if leNS == "" {
+			leNS = "monitoring"
+		}
+
+		// Pod identity for the lease holder field.
+		podName, _ := os.Hostname()
+		if p := os.Getenv("POD_NAME"); p != "" {
+			podName = p
+		}
+
+		startRemoteWrite := func(leaderCtx context.Context) {
+			logrus.Info("Acquired leader election — waiting for service discovery to initialize...")
+			time.Sleep(10 * time.Second)
+			logrus.Info("Starting remote write controller (leader)")
+			if err := remoteWriteController.Start(leaderCtx); err != nil {
+				logrus.Errorf("Remote write controller error: %v", err)
 			}
-		}()
+		}
+
+		if *leaderElect {
+			go func() {
+				lock := &resourcelock.LeaseLock{
+					LeaseMeta: metav1.ObjectMeta{
+						Name:      *leaderElectionID,
+						Namespace: leNS,
+					},
+					Client: k8sClient.CoordinationV1(),
+					LockConfig: resourcelock.ResourceLockConfig{
+						Identity: podName,
+					},
+				}
+				leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+					Lock:            lock,
+					ReleaseOnCancel: true, // release lease on graceful shutdown for fast failover
+					LeaseDuration:   15 * time.Second,
+					RenewDeadline:   10 * time.Second,
+					RetryPeriod:     2 * time.Second,
+					Callbacks: leaderelection.LeaderCallbacks{
+						OnStartedLeading: func(leaderCtx context.Context) {
+							startRemoteWrite(leaderCtx)
+						},
+						OnStoppedLeading: func() {
+							// leaderCtx is already cancelled by the framework;
+							// all remote write goroutines stop automatically.
+							logrus.Info("Lost leader election — remote write controller stopped")
+						},
+						OnNewLeader: func(identity string) {
+							if identity != podName {
+								logrus.Infof("Remote write leader is %s (this pod is standby)", identity)
+							}
+						},
+					},
+				})
+			}()
+		} else {
+			// Leader election disabled (single-replica or local dev).
+			go startRemoteWrite(ctx)
+		}
+	} else if remoteWriteController != nil {
+		logrus.Info("Remote write controller created but not started (feature disabled in config)")
 	}
 
 	// Start server in a goroutine

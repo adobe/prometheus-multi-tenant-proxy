@@ -483,6 +483,12 @@ func (c *Controller) collectMetrics(job *RemoteWriteJob) {
 		allMetrics = append(allMetrics, metrics...)
 	}
 
+	// Deduplicate metrics by (name, label fingerprint): when multiple infra Prometheus
+	// targets are cluster-wide (not node-sharded), they all return the same series.
+	// Writing 13 copies with slightly different timestamps corrupts rate() calculations.
+	// Keep the sample with the most recent timestamp for each unique series.
+	allMetrics = deduplicateMetrics(allMetrics)
+
 	// Store the latest collected metrics for this job
 	key := fmt.Sprintf("%s/%s", job.MetricAccess.Namespace, job.MetricAccess.Name)
 	c.mu.Lock()

@@ -187,7 +187,7 @@ remoteWrite:
     serviceName: "prometheus-operated"
     servicePort: 9090
     replicas: 2
-    statefulSetName: "prometheus-enm-promoperator-prometheus"
+    statefulSetName: "prometheus-ha"
   extraLabels:
     tenant: "my-team"
     cluster: "ethos11-prod-va7"
@@ -214,7 +214,7 @@ remoteWrite:
       targetLabel: metrics_path
       replacement: "/metrics"
   extraLabels:
-    enm_job: "tee-my-namespace"
+    monitoring_job: "tee-my-namespace"
   honorLabels: true
 ```
 

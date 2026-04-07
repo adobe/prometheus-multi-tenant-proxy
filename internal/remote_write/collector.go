@@ -418,4 +418,35 @@ func applyMetricRelabelings(metrics []Metric, rules []v1alpha1.MetricRelabelConf
 	}
 
 	return result
-} 
+}
+
+// deduplicateMetrics removes duplicate series collected from multiple infra Prometheus
+// targets that are cluster-wide (not node-sharded). For each unique (name, label fingerprint)
+// pair, keeps the sample with the highest value.
+//
+// We use highest-value (not most-recent-timestamp) because different infra Prometheus
+// instances scrape the same cAdvisor endpoint at slightly different sub-second offsets.
+// Picking by timestamp is non-deterministic when timestamps are within the same second,
+// and can select a marginally lower counter reading that appears as a counter reset in
+// the destination Prometheus, producing massive rate() spikes.
+// Counters are monotonically increasing, so the highest value is always the most correct.
+func deduplicateMetrics(metrics []Metric) []Metric {
+	type metricKey struct {
+		name string
+		fp   model.Fingerprint
+	}
+	seen := make(map[metricKey]int, len(metrics)) // key → index in result
+	result := make([]Metric, 0, len(metrics))
+	for _, m := range metrics {
+		k := metricKey{name: m.Name, fp: m.Labels.Fingerprint()}
+		if idx, exists := seen[k]; exists {
+			if m.Value > result[idx].Value {
+				result[idx] = m
+			}
+		} else {
+			seen[k] = len(result)
+			result = append(result, m)
+		}
+	}
+	return result
+}

@@ -17,8 +17,8 @@ func TestResolveTargetNamespace_NoOverride(t *testing.T) {
 	target := &v1alpha1.PrometheusTarget{
 		ServiceName: "prometheus-operated",
 	}
-	got := resolveTargetNamespace(target, "ns-team-etel-integration")
-	if got != "ns-team-etel-integration" {
+	got := resolveTargetNamespace(target, "ns-app")
+	if got != "ns-app" {
 		t.Errorf("expected CR namespace, got %q", got)
 	}
 }
@@ -26,10 +26,10 @@ func TestResolveTargetNamespace_NoOverride(t *testing.T) {
 func TestResolveTargetNamespace_WithOverride(t *testing.T) {
 	target := &v1alpha1.PrometheusTarget{
 		ServiceName:     "prometheus-operated",
-		TargetNamespace: "ns-team-enm-integration",
+		TargetNamespace: "ns-monitoring",
 	}
-	got := resolveTargetNamespace(target, "ns-team-etel-integration")
-	if got != "ns-team-enm-integration" {
+	got := resolveTargetNamespace(target, "ns-app")
+	if got != "ns-monitoring" {
 		t.Errorf("expected targetNamespace override, got %q", got)
 	}
 }
@@ -43,11 +43,11 @@ func TestBuildPrometheusURLs_SingleReplica_SameNamespace(t *testing.T) {
 		ServiceName: "prometheus-operated",
 		ServicePort: 9090,
 	}
-	urls := buildPrometheusURLs(target, "ns-team-enm-integration")
+	urls := buildPrometheusURLs(target, "ns-monitoring")
 	if len(urls) != 1 {
 		t.Fatalf("expected 1 URL, got %d", len(urls))
 	}
-	want := "http://prometheus-operated.ns-team-enm-integration.svc.cluster.local:9090/api/v1/write"
+	want := "http://prometheus-operated.ns-monitoring.svc.cluster.local:9090/api/v1/write"
 	if urls[0] != want {
 		t.Errorf("got %q, want %q", urls[0], want)
 	}
@@ -58,8 +58,8 @@ func TestBuildPrometheusURLs_DefaultPort(t *testing.T) {
 		ServiceName: "prometheus-operated",
 		// ServicePort intentionally zero — should default to 9090
 	}
-	urls := buildPrometheusURLs(target, "ns-team-enm-integration")
-	want := "http://prometheus-operated.ns-team-enm-integration.svc.cluster.local:9090/api/v1/write"
+	urls := buildPrometheusURLs(target, "ns-monitoring")
+	want := "http://prometheus-operated.ns-monitoring.svc.cluster.local:9090/api/v1/write"
 	if urls[0] != want {
 		t.Errorf("got %q, want %q", urls[0], want)
 	}
@@ -74,15 +74,15 @@ func TestBuildPrometheusURLs_MultiReplica_SameNamespace(t *testing.T) {
 		ServiceName:     "prometheus-operated",
 		ServicePort:     9090,
 		Replicas:        2,
-		StatefulSetName: "prometheus-enm-promoperator-prometheus",
+		StatefulSetName: "prometheus-ha",
 	}
-	urls := buildPrometheusURLs(target, "ns-team-enm-integration")
+	urls := buildPrometheusURLs(target, "ns-monitoring")
 	if len(urls) != 2 {
 		t.Fatalf("expected 2 URLs, got %d", len(urls))
 	}
 	wants := []string{
-		"http://prometheus-enm-promoperator-prometheus-0.prometheus-operated.ns-team-enm-integration.svc.cluster.local:9090/api/v1/write",
-		"http://prometheus-enm-promoperator-prometheus-1.prometheus-operated.ns-team-enm-integration.svc.cluster.local:9090/api/v1/write",
+		"http://prometheus-ha-0.prometheus-operated.ns-monitoring.svc.cluster.local:9090/api/v1/write",
+		"http://prometheus-ha-1.prometheus-operated.ns-monitoring.svc.cluster.local:9090/api/v1/write",
 	}
 	for i, want := range wants {
 		if urls[i] != want {
@@ -92,25 +92,24 @@ func TestBuildPrometheusURLs_MultiReplica_SameNamespace(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-namespace: secondary NS CR → primary NS Prometheus
-// This is the exact scenario Alex reported: etel-integration CR must push
-// to Prometheus in enm-integration.
+// Cross-namespace: CR in tenant namespace pushes to Prometheus in a shared
+// monitoring namespace. This is the primary use case for targetNamespace —
+// a MetricAccess CR created in ns-app must push to Prometheus in ns-monitoring.
 // ---------------------------------------------------------------------------
 
 func TestBuildPrometheusURLs_CrossNamespace_ServiceURL(t *testing.T) {
 	target := &v1alpha1.PrometheusTarget{
 		ServiceName:     "prometheus-operated",
 		ServicePort:     9090,
-		TargetNamespace: "ns-team-enm-integration",
+		TargetNamespace: "ns-monitoring",
 	}
-	// targetNS resolved by resolveTargetNamespace (already tested above)
-	targetNS := resolveTargetNamespace(target, "ns-team-etel-integration")
+	targetNS := resolveTargetNamespace(target, "ns-app")
 	urls := buildPrometheusURLs(target, targetNS)
 
 	if len(urls) != 1 {
 		t.Fatalf("expected 1 URL, got %d", len(urls))
 	}
-	want := "http://prometheus-operated.ns-team-enm-integration.svc.cluster.local:9090/api/v1/write"
+	want := "http://prometheus-operated.ns-monitoring.svc.cluster.local:9090/api/v1/write"
 	if urls[0] != want {
 		t.Errorf("got %q, want %q", urls[0], want)
 	}
@@ -121,18 +120,18 @@ func TestBuildPrometheusURLs_CrossNamespace_MultiReplica(t *testing.T) {
 		ServiceName:     "prometheus-operated",
 		ServicePort:     9090,
 		Replicas:        2,
-		StatefulSetName: "prometheus-enm-promoperator-prometheus",
-		TargetNamespace: "ns-team-enm-integration",
+		StatefulSetName: "prometheus-ha",
+		TargetNamespace: "ns-monitoring",
 	}
-	targetNS := resolveTargetNamespace(target, "ns-team-etel-integration")
+	targetNS := resolveTargetNamespace(target, "ns-app")
 	urls := buildPrometheusURLs(target, targetNS)
 
 	if len(urls) != 2 {
 		t.Fatalf("expected 2 URLs, got %d", len(urls))
 	}
 	wants := []string{
-		"http://prometheus-enm-promoperator-prometheus-0.prometheus-operated.ns-team-enm-integration.svc.cluster.local:9090/api/v1/write",
-		"http://prometheus-enm-promoperator-prometheus-1.prometheus-operated.ns-team-enm-integration.svc.cluster.local:9090/api/v1/write",
+		"http://prometheus-ha-0.prometheus-operated.ns-monitoring.svc.cluster.local:9090/api/v1/write",
+		"http://prometheus-ha-1.prometheus-operated.ns-monitoring.svc.cluster.local:9090/api/v1/write",
 	}
 	for i, want := range wants {
 		if urls[i] != want {
@@ -141,18 +140,18 @@ func TestBuildPrometheusURLs_CrossNamespace_MultiReplica(t *testing.T) {
 	}
 }
 
-// Ensure that setting TargetNamespace == CR namespace is identical to not setting it.
+// Setting targetNamespace == CR namespace must be identical to omitting it.
 func TestBuildPrometheusURLs_TargetNamespaceSameAsCR(t *testing.T) {
 	withOverride := &v1alpha1.PrometheusTarget{
 		ServiceName:     "prometheus-operated",
 		ServicePort:     9090,
-		TargetNamespace: "ns-team-enm-integration",
+		TargetNamespace: "ns-monitoring",
 	}
 	withoutOverride := &v1alpha1.PrometheusTarget{
 		ServiceName: "prometheus-operated",
 		ServicePort: 9090,
 	}
-	ns := "ns-team-enm-integration"
+	ns := "ns-monitoring"
 	u1 := buildPrometheusURLs(withOverride, resolveTargetNamespace(withOverride, ns))
 	u2 := buildPrometheusURLs(withoutOverride, resolveTargetNamespace(withoutOverride, ns))
 	if u1[0] != u2[0] {
@@ -236,17 +235,18 @@ func TestApplyMetricRelabelings_NoRules(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// MetricAccess spec wiring: verify TargetNamespace flows through the type
+// MetricAccess spec wiring: verify TargetNamespace flows end-to-end through
+// the full spec — CR in tenant namespace, Prometheus in monitoring namespace.
 // ---------------------------------------------------------------------------
 
 func TestMetricAccessSpec_TargetNamespace(t *testing.T) {
 	ma := &v1alpha1.MetricAccess{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "enm-ns-team-etel-integration",
-			Namespace: "ns-team-etel-integration",
+			Name:      "tenant-metricaccess",
+			Namespace: "ns-app",
 		},
 		Spec: v1alpha1.MetricAccessSpec{
-			Source:  "ns-team-etel-integration",
+			Source:  "ns-app",
 			Metrics: []string{"container_cpu_usage_seconds_total"},
 			RemoteWrite: &v1alpha1.RemoteWriteConfig{
 				Enabled: true,
@@ -255,8 +255,8 @@ func TestMetricAccessSpec_TargetNamespace(t *testing.T) {
 					ServiceName:     "prometheus-operated",
 					ServicePort:     9090,
 					Replicas:        2,
-					StatefulSetName: "prometheus-enm-promoperator-prometheus",
-					TargetNamespace: "ns-team-enm-integration",
+					StatefulSetName: "prometheus-ha",
+					TargetNamespace: "ns-monitoring",
 				},
 			},
 		},
@@ -264,8 +264,8 @@ func TestMetricAccessSpec_TargetNamespace(t *testing.T) {
 
 	target := ma.Spec.RemoteWrite.Prometheus
 	targetNS := resolveTargetNamespace(target, ma.Namespace)
-	if targetNS != "ns-team-enm-integration" {
-		t.Errorf("targetNS: got %q, want ns-team-enm-integration", targetNS)
+	if targetNS != "ns-monitoring" {
+		t.Errorf("targetNS: got %q, want ns-monitoring", targetNS)
 	}
 
 	urls := buildPrometheusURLs(target, targetNS)
@@ -273,20 +273,107 @@ func TestMetricAccessSpec_TargetNamespace(t *testing.T) {
 		t.Fatalf("expected 2 pod URLs, got %d", len(urls))
 	}
 	for _, u := range urls {
-		if !contains(u, "ns-team-enm-integration") {
-			t.Errorf("URL %q does not contain primary namespace", u)
+		if !contains(u, "ns-monitoring") {
+			t.Errorf("URL %q does not contain target namespace", u)
 		}
-		if contains(u, "ns-team-etel-integration") {
-			t.Errorf("URL %q must not contain secondary CR namespace", u)
+		if contains(u, "ns-app") {
+			t.Errorf("URL %q must not contain the CR's own namespace", u)
 		}
 	}
 }
 
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsHelper(s, sub))
+// ---------------------------------------------------------------------------
+// deduplicateMetrics
+// ---------------------------------------------------------------------------
+
+func TestDeduplicateMetrics_NoDuplicates(t *testing.T) {
+	metrics := []Metric{
+		makeMetric("up", map[string]string{"job": "a"}),
+		makeMetric("up", map[string]string{"job": "b"}),
+	}
+	result := deduplicateMetrics(metrics)
+	if len(result) != 2 {
+		t.Errorf("expected 2 unique metrics, got %d", len(result))
+	}
 }
 
-func containsHelper(s, sub string) bool {
+func TestDeduplicateMetrics_KeepsHighestValue(t *testing.T) {
+	low := Metric{Name: "cpu", Labels: model.LabelSet{"pod": "p1"}, Value: 100.0, Timestamp: time.Now().Add(-10 * time.Second)}
+	high := Metric{Name: "cpu", Labels: model.LabelSet{"pod": "p1"}, Value: 101.0, Timestamp: time.Now()}
+	// high-value sample arrives second
+	result := deduplicateMetrics([]Metric{low, high})
+	if len(result) != 1 {
+		t.Fatalf("expected 1 deduplicated metric, got %d", len(result))
+	}
+	if result[0].Value != 101.0 {
+		t.Errorf("expected highest value 101.0, got %f", result[0].Value)
+	}
+}
+
+func TestDeduplicateMetrics_KeepsHighestWhenHighArrivesFirst(t *testing.T) {
+	high := Metric{Name: "cpu", Labels: model.LabelSet{"pod": "p1"}, Value: 101.0, Timestamp: time.Now()}
+	low := Metric{Name: "cpu", Labels: model.LabelSet{"pod": "p1"}, Value: 100.0, Timestamp: time.Now().Add(-10 * time.Second)}
+	// high-value sample arrives first in slice — should still keep it
+	result := deduplicateMetrics([]Metric{high, low})
+	if len(result) != 1 {
+		t.Fatalf("expected 1 deduplicated metric, got %d", len(result))
+	}
+	if result[0].Value != 101.0 {
+		t.Errorf("expected highest value 101.0, got %f", result[0].Value)
+	}
+}
+
+// Regression test: source with a newer timestamp but marginally lower counter value
+// (caused by sub-second scrape timing differences between infra Prometheus instances)
+// must NOT win the dedup — the higher value must always be kept.
+func TestDeduplicateMetrics_NewerTimestampLowerValueLoses(t *testing.T) {
+	// Simulates the production bug: target A scraped cAdvisor at T+0.1s got 9020.6257,
+	// target B scraped at T+0.3s got 9020.5701 (marginally lower due to timing).
+	higherValue := Metric{Name: "container_cpu_usage_seconds_total", Labels: model.LabelSet{"pod": "p1"}, Value: 9020.6257, Timestamp: time.Now()}
+	lowerValueNewerTS := Metric{Name: "container_cpu_usage_seconds_total", Labels: model.LabelSet{"pod": "p1"}, Value: 9020.5701, Timestamp: time.Now().Add(200 * time.Millisecond)}
+	result := deduplicateMetrics([]Metric{higherValue, lowerValueNewerTS})
+	if len(result) != 1 {
+		t.Fatalf("expected 1 metric, got %d", len(result))
+	}
+	if result[0].Value != 9020.6257 {
+		t.Errorf("must keep higher value 9020.6257, got %f — this would cause a counter reset spike", result[0].Value)
+	}
+}
+
+func TestDeduplicateMetrics_13Copies(t *testing.T) {
+	// Simulates 13 infra Prometheus targets all returning the same series.
+	base := time.Now().Add(-time.Minute)
+	var metrics []Metric
+	for i := 0; i < 13; i++ {
+		metrics = append(metrics, Metric{
+			Name:      "container_cpu_usage_seconds_total",
+			Labels:    model.LabelSet{"pod": "alertmanager-0", "container": "alertmanager"},
+			Value:     float64(1000 + i),
+			Timestamp: base.Add(time.Duration(i) * time.Second),
+		})
+	}
+	result := deduplicateMetrics(metrics)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 metric after dedup of 13 copies, got %d", len(result))
+	}
+	// Should keep the one with the highest value (index 12 = value 1012)
+	if result[0].Value != 1012.0 {
+		t.Errorf("expected highest value 1012.0, got %f", result[0].Value)
+	}
+}
+
+func TestDeduplicateMetrics_DifferentMetricNamesSameLabels(t *testing.T) {
+	metrics := []Metric{
+		{Name: "container_cpu_usage_seconds_total", Labels: model.LabelSet{"pod": "p1"}, Value: 1.0, Timestamp: time.Now()},
+		{Name: "container_memory_usage_bytes", Labels: model.LabelSet{"pod": "p1"}, Value: 2.0, Timestamp: time.Now()},
+	}
+	result := deduplicateMetrics(metrics)
+	if len(result) != 2 {
+		t.Errorf("different metric names with same labels must not be deduped, got %d", len(result))
+	}
+}
+
+func contains(s, sub string) bool {
 	for i := 0; i <= len(s)-len(sub); i++ {
 		if s[i:i+len(sub)] == sub {
 			return true

@@ -90,14 +90,14 @@ type PrometheusTarget struct {
 	// This ensures all HA replicas receive identical metrics.
 	Replicas int32 `json:"replicas,omitempty"`
 
-	// StatefulSet name for direct pod DNS targeting (e.g., "prometheus-enm-promoperator-prometheus").
+	// StatefulSet name for direct pod DNS targeting (e.g., "prometheus-kube-prometheus-prometheus").
 	// Used with Replicas to construct pod DNS: {statefulSetName}-{N}.{serviceName}.{namespace}.svc.cluster.local
 	StatefulSetName string `json:"statefulSetName,omitempty"`
 
 	// TargetNamespace is the namespace where the Prometheus instance lives.
 	// Defaults to the MetricAccess CR's own namespace if not set.
-	// Use this for multi-namespace eNM setups where Prometheus lives in a different namespace
-	// than the MetricAccess CR (e.g., secondary monitored namespaces).
+	// Use this for multi-namespace deployments where Prometheus lives in a different namespace
+	// than the MetricAccess CR (e.g., a shared monitoring namespace with multiple tenant namespaces).
 	TargetNamespace string `json:"targetNamespace,omitempty"`
 }
 

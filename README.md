@@ -403,7 +403,7 @@ Multiple `MetricAccess` CRs can coexist in the same namespace. Each CR defines i
 apiVersion: observability.ethos.io/v1alpha1
 kind: MetricAccess
 metadata:
-  name: enm-container-metrics
+  name: tenant-container-metrics
   namespace: my-namespace
 spec:
   source: my-namespace
@@ -427,7 +427,7 @@ spec:
 apiVersion: observability.ethos.io/v1alpha1
 kind: MetricAccess
 metadata:
-  name: enm-kubelet-metrics
+  name: tenant-kubelet-metrics
   namespace: my-namespace
 spec:
   source: my-namespace

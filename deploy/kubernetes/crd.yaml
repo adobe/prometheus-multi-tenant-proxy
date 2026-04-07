@@ -140,7 +140,7 @@ spec:
                         description: |-
                           Namespace where the Prometheus instance lives.
                           Defaults to the MetricAccess CR's own namespace if not set.
-                          Use this for multi-namespace eNM setups where Prometheus lives in a different
+                          Use this for multi-namespace deployments where Prometheus lives in a different
                           namespace than the MetricAccess CR (e.g., secondary monitored namespaces).
                         type: string
                     required:
@@ -230,7 +230,7 @@ spec:
                             description: |-
                               Namespace where the Prometheus instance lives.
                               Defaults to the MetricAccess CR's own namespace if not set.
-                              Use this for multi-namespace eNM setups where Prometheus lives in a different
+                              Use this for multi-namespace deployments where Prometheus lives in a different
                               namespace than the MetricAccess CR (e.g., secondary monitored namespaces).
                             type: string
                         required:

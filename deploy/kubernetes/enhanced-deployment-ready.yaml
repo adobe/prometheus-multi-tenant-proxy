@@ -167,6 +167,7 @@ spec:
             - "--log-level=info"
             - "--port=8080"
             - "--config=/etc/prometheus-proxy/config.yaml"
+            - "--leader-elect=true"
           env:
             - name: POD_UID
               valueFrom:
@@ -723,6 +724,9 @@ rules:
 - apiGroups: ["observability.ethos.io"]
   resources: ["metricaccesses"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
