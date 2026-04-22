@@ -105,9 +105,8 @@ type RemoteWriteConfig struct {
 	// write HTTP request. Prometheus 3.x rejects decoded bodies larger than
 	// 32 MiB; splitting into batches keeps each request well under that limit.
 	// This applies regardless of the metricIsolation setting on each
-	// MetricAccess CR. Values <= 0 disable batching (all metrics in one
-	// request — legacy behaviour, not recommended for production).
-	// Default: 5000.
+	// MetricAccess CR. Batching is always active; the only tunable is the
+	// chunk size. Unset or zero values default to 5000.
 	BatchSize int `yaml:"batch_size"`
 }
 

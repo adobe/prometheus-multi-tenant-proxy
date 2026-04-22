@@ -426,8 +426,10 @@ func applyMetricRelabelings(metrics []Metric, rules []v1alpha1.MetricRelabelConf
 // Prometheus 3.x). Each batch is a sub-slice of the original slice — no data
 // is copied.
 //
-// If batchSize <= 0, all metrics are returned in a single batch (no-op;
-// matches legacy unbatched behaviour — not recommended for large collections).
+// The caller (sendMetrics) always passes a positive batchSize sourced from
+// RemoteWriteConfig.BatchSize, which setDefaults() guarantees is >= 1.
+// The batchSize <= 0 branch is a defensive no-op and is not reachable through
+// normal operator configuration.
 func splitIntoBatches(metrics []Metric, batchSize int) [][]Metric {
 	if batchSize <= 0 || len(metrics) <= batchSize {
 		return [][]Metric{metrics}
