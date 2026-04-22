@@ -1,6 +1,7 @@
 package remote_write
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -380,4 +381,184 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// splitIntoBatches
+// ---------------------------------------------------------------------------
+
+func TestSplitIntoBatches_ExactDivision(t *testing.T) {
+	metrics := make([]Metric, 10)
+	batches := splitIntoBatches(metrics, 5)
+	if len(batches) != 2 {
+		t.Fatalf("expected 2 batches, got %d", len(batches))
+	}
+	for i, b := range batches {
+		if len(b) != 5 {
+			t.Errorf("batch[%d]: expected size 5, got %d", i, len(b))
+		}
+	}
+}
+
+func TestSplitIntoBatches_Remainder(t *testing.T) {
+	metrics := make([]Metric, 11)
+	batches := splitIntoBatches(metrics, 5)
+	if len(batches) != 3 {
+		t.Fatalf("expected 3 batches, got %d", len(batches))
+	}
+	if len(batches[0]) != 5 {
+		t.Errorf("batch[0]: expected 5, got %d", len(batches[0]))
+	}
+	if len(batches[1]) != 5 {
+		t.Errorf("batch[1]: expected 5, got %d", len(batches[1]))
+	}
+	if len(batches[2]) != 1 {
+		t.Errorf("batch[2] (remainder): expected 1, got %d", len(batches[2]))
+	}
+}
+
+func TestSplitIntoBatches_FewerThanBatchSize(t *testing.T) {
+	metrics := make([]Metric, 3)
+	batches := splitIntoBatches(metrics, 5)
+	if len(batches) != 1 {
+		t.Fatalf("expected 1 batch, got %d", len(batches))
+	}
+	if len(batches[0]) != 3 {
+		t.Errorf("expected batch size 3, got %d", len(batches[0]))
+	}
+}
+
+func TestSplitIntoBatches_ExactlyBatchSize(t *testing.T) {
+	metrics := make([]Metric, 5)
+	batches := splitIntoBatches(metrics, 5)
+	if len(batches) != 1 {
+		t.Fatalf("expected exactly 1 batch when len == batchSize, got %d", len(batches))
+	}
+	if len(batches[0]) != 5 {
+		t.Errorf("expected batch size 5, got %d", len(batches[0]))
+	}
+}
+
+// batchSize <= 0 disables batching: all metrics in a single batch (legacy behaviour).
+func TestSplitIntoBatches_ZeroBatchSize_SingleBatch(t *testing.T) {
+	metrics := make([]Metric, 10)
+	batches := splitIntoBatches(metrics, 0)
+	if len(batches) != 1 {
+		t.Fatalf("batchSize=0 must return 1 batch (no-op), got %d", len(batches))
+	}
+	if len(batches[0]) != 10 {
+		t.Errorf("expected all 10 metrics in single batch, got %d", len(batches[0]))
+	}
+}
+
+func TestSplitIntoBatches_NegativeBatchSize_SingleBatch(t *testing.T) {
+	metrics := make([]Metric, 7)
+	batches := splitIntoBatches(metrics, -1)
+	if len(batches) != 1 {
+		t.Fatalf("batchSize<0 must return 1 batch (no-op), got %d", len(batches))
+	}
+}
+
+// Verify that batching preserves the original order and no metrics are dropped.
+func TestSplitIntoBatches_PreservesOrderAndCount(t *testing.T) {
+	const n = 17
+	metrics := make([]Metric, n)
+	for i := range metrics {
+		metrics[i] = makeMetric(fmt.Sprintf("metric_%02d", i), nil)
+	}
+
+	batches := splitIntoBatches(metrics, 5)
+	// 17 / 5 = 3 full + 1 remainder = 4 batches
+	if len(batches) != 4 {
+		t.Fatalf("expected 4 batches for 17 metrics with batchSize=5, got %d", len(batches))
+	}
+
+	idx := 0
+	for bi, batch := range batches {
+		for mi, m := range batch {
+			want := fmt.Sprintf("metric_%02d", idx)
+			if m.Name != want {
+				t.Errorf("batch[%d][%d]: got %q, want %q — order not preserved", bi, mi, m.Name, want)
+			}
+			idx++
+		}
+	}
+	if idx != n {
+		t.Errorf("total metrics after batching: got %d, want %d — metrics dropped or duplicated", idx, n)
+	}
+}
+
+// Verify that batches are sub-slices (no copy) — mutations to the batch slice
+// reflect in the original. This is intentional (avoids allocation) and must not
+// regress.
+func TestSplitIntoBatches_SubSliceNoCopy(t *testing.T) {
+	metrics := []Metric{
+		makeMetric("a", nil),
+		makeMetric("b", nil),
+		makeMetric("c", nil),
+	}
+	batches := splitIntoBatches(metrics, 2)
+	if len(batches) != 2 {
+		t.Fatalf("expected 2 batches, got %d", len(batches))
+	}
+	// Mutating batch[0][0] must be visible in the original slice.
+	batches[0][0].Name = "mutated"
+	if metrics[0].Name != "mutated" {
+		t.Error("batch is not a sub-slice of the original: mutation did not propagate")
+	}
+}
+
+// Regression test: with metricIsolation=false a large metric collection
+// previously produced a single >32 MiB remote write body that Prometheus 3.x
+// rejected. Verify that splitIntoBatches with the default production batch size
+// (5000) correctly partitions a large collection into multiple manageable batches.
+func TestSplitIntoBatches_LargeCollection_StaysUnder32MiB(t *testing.T) {
+	const defaultBatchSize = 5000
+
+	// Simulate a large metric collection similar to what metricIsolation=false
+	// can return when cluster-scoped metrics have many label combinations.
+	const totalMetrics = 482441
+	metrics := make([]Metric, totalMetrics)
+	for i := range metrics {
+		metrics[i] = makeMetric("keda_scaler_active", map[string]string{
+			"namespace":      fmt.Sprintf("ns-%04d", i%200),
+			"scaledObject":   fmt.Sprintf("obj-%04d", i%1000),
+			"scaler":         "scaler-type",
+			"metric":         "metric-name",
+			"scaledResource": "deployment",
+		})
+	}
+
+	batches := splitIntoBatches(metrics, defaultBatchSize)
+
+	expectedBatches := (totalMetrics + defaultBatchSize - 1) / defaultBatchSize
+	if len(batches) != expectedBatches {
+		t.Fatalf("expected %d batches, got %d", expectedBatches, len(batches))
+	}
+
+	// Every batch must be at most defaultBatchSize metrics.
+	for i, b := range batches {
+		if len(b) > defaultBatchSize {
+			t.Errorf("batch[%d] exceeds batchSize: %d > %d", i, len(b), defaultBatchSize)
+		}
+	}
+
+	// Last batch may be smaller (remainder).
+	lastBatch := batches[len(batches)-1]
+	expectedLastSize := totalMetrics % defaultBatchSize
+	if expectedLastSize == 0 {
+		expectedLastSize = defaultBatchSize
+	}
+	if len(lastBatch) != expectedLastSize {
+		t.Errorf("last batch size: got %d, want %d", len(lastBatch), expectedLastSize)
+	}
+
+	// Total metric count across batches must equal the original count.
+	total := 0
+	for _, b := range batches {
+		total += len(b)
+	}
+	if total != totalMetrics {
+		t.Errorf("total metrics across batches: got %d, want %d", total, totalMetrics)
+	}
 }

@@ -904,9 +904,14 @@ func min(a, b int) int {
 	return b
 }
 
-// sendMetrics sends collected metrics to the remote write target
+// sendMetrics sends collected metrics to the remote write target, splitting
+// them into batches to avoid exceeding Prometheus's 32 MiB decoded body limit.
+// Each batch is sent as a separate HTTP request; a per-batch timeout of 30 s
+// is used so a slow receiver does not block all remaining batches.
+// All batches are attempted even if an earlier one fails; errors are aggregated
+// and returned so the caller can record the failure accurately.
 func (c *Controller) sendMetrics(job *RemoteWriteJob, metrics []Metric) error {
-	// Create appropriate collector based on target type
+	// Select collector based on target type.
 	var collector Collector
 	switch job.MetricAccess.Spec.RemoteWrite.Target.Type {
 	case "prometheus":
@@ -916,19 +921,55 @@ func (c *Controller) sendMetrics(job *RemoteWriteJob, metrics []Metric) error {
 	case "remote_write":
 		collector = NewRemoteWriteCollector(c.client)
 	default:
-		return fmt.Errorf("unsupported remote write target type: %s", 
+		return fmt.Errorf("unsupported remote write target type: %s",
 			job.MetricAccess.Spec.RemoteWrite.Target.Type)
 	}
 
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	batches := splitIntoBatches(metrics, c.config.BatchSize)
 
-	// Send metrics using the collector
-	if err := collector.Send(ctx, job.MetricAccess, metrics); err != nil {
-		return fmt.Errorf("failed to send metrics: %w", err)
+	logrus.WithFields(logrus.Fields{
+		"namespace":       job.MetricAccess.Namespace,
+		"name":            job.MetricAccess.Name,
+		"total_metrics":   len(metrics),
+		"total_batches":   len(batches),
+		"batch_size":      c.config.BatchSize,
+		"metric_isolation": job.MetricAccess.Spec.MetricIsolation,
+	}).Info("Sending collected metrics in batches")
+
+	var errs []string
+	for i, batch := range batches {
+		logrus.WithFields(logrus.Fields{
+			"namespace":     job.MetricAccess.Namespace,
+			"name":          job.MetricAccess.Name,
+			"batch":         i + 1,
+			"total_batches": len(batches),
+			"batch_size":    len(batch),
+		}).Debug("Sending metrics batch")
+
+		// Fresh 30 s context per batch so a slow receiver on batch N does not
+		// starve the timeout budget for batches N+1, N+2, …
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := collector.Send(ctx, job.MetricAccess, batch)
+		cancel()
+
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"namespace":     job.MetricAccess.Namespace,
+				"name":          job.MetricAccess.Name,
+				"batch":         i + 1,
+				"total_batches": len(batches),
+				"error":         err,
+			}).Error("Failed to send metrics batch")
+			errs = append(errs, fmt.Sprintf("batch %d/%d: %v", i+1, len(batches), err))
+			// Continue: attempt remaining batches even after a partial failure.
+			// Metrics from failed batches will be retried on the next collection cycle.
+		}
 	}
 
+	if len(errs) > 0 {
+		return fmt.Errorf("remote write errors (%d/%d batches failed): %s",
+			len(errs), len(batches), strings.Join(errs, "; "))
+	}
 	return nil
 }
 
