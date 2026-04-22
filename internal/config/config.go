@@ -87,19 +87,28 @@ type ProxyConfig struct {
 type RemoteWriteConfig struct {
 	// Enable remote write controller
 	Enabled bool `yaml:"enabled"`
-	
+
 	// Default collection interval for remote write jobs
 	DefaultInterval time.Duration `yaml:"default_interval"`
-	
+
 	// Maximum number of concurrent remote write jobs
 	MaxConcurrentJobs int `yaml:"max_concurrent_jobs"`
-	
+
 	// Timeout for metric collection from source targets
 	CollectionTimeout time.Duration `yaml:"collection_timeout"`
-	
+
 	// Retry configuration for failed collections
 	RetryAttempts int           `yaml:"retry_attempts"`
 	RetryDelay    time.Duration `yaml:"retry_delay"`
+
+	// BatchSize is the maximum number of metrics included in a single remote
+	// write HTTP request. Prometheus 3.x rejects decoded bodies larger than
+	// 32 MiB; splitting into batches keeps each request well under that limit.
+	// This applies regardless of the metricIsolation setting on each
+	// MetricAccess CR. Values <= 0 disable batching (all metrics in one
+	// request — legacy behaviour, not recommended for production).
+	// Default: 5000.
+	BatchSize int `yaml:"batch_size"`
 }
 
 // AuthConfig holds authentication settings (optional)
@@ -213,6 +222,10 @@ func setDefaults(config *Config) error {
 	
 	if config.RemoteWrite.RetryDelay == 0 {
 		config.RemoteWrite.RetryDelay = 5 * time.Second
+	}
+
+	if config.RemoteWrite.BatchSize <= 0 {
+		config.RemoteWrite.BatchSize = 5000
 	}
 	
 	// Auth defaults

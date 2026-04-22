@@ -420,6 +420,29 @@ func applyMetricRelabelings(metrics []Metric, rules []v1alpha1.MetricRelabelConf
 	return result
 }
 
+// splitIntoBatches partitions metrics into consecutive slices of at most
+// batchSize elements. This prevents individual remote write HTTP requests from
+// exceeding Prometheus's hardcoded 32 MiB decoded body limit (introduced in
+// Prometheus 3.x). Each batch is a sub-slice of the original slice — no data
+// is copied.
+//
+// If batchSize <= 0, all metrics are returned in a single batch (no-op;
+// matches legacy unbatched behaviour — not recommended for large collections).
+func splitIntoBatches(metrics []Metric, batchSize int) [][]Metric {
+	if batchSize <= 0 || len(metrics) <= batchSize {
+		return [][]Metric{metrics}
+	}
+	batches := make([][]Metric, 0, (len(metrics)+batchSize-1)/batchSize)
+	for i := 0; i < len(metrics); i += batchSize {
+		end := i + batchSize
+		if end > len(metrics) {
+			end = len(metrics)
+		}
+		batches = append(batches, metrics[i:end])
+	}
+	return batches
+}
+
 // deduplicateMetrics removes duplicate series collected from multiple infra Prometheus
 // targets that are cluster-wide (not node-sharded). For each unique (name, label fingerprint)
 // pair, keeps the sample with the highest value.
