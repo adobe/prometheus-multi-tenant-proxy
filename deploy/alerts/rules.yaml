@@ -1,0 +1,85 @@
+# Plain Prometheus rules mirror of prometheusrule.yaml (spec.groups), used so that
+# `promtool test rules` / `promtool check rules` can load the rule bodies directly
+# (promtool cannot parse the PrometheusRule CRD wrapper). Keep the group/rule
+# bodies here byte-for-byte in sync with deploy/alerts/prometheusrule.yaml.
+#
+# The shippable artifact is prometheusrule.yaml (kind: PrometheusRule). This file
+# exists only for local/CI promtool validation and is NOT applied to a cluster.
+groups:
+  - name: teev2-proxy-collection-health
+    rules:
+      # PRIMARY silent-stall signal (proxy_tenant_collection_up metric).
+      # proxy_tenant_collection_up is only emitted for tenants that currently have
+      # an enabled remote-write job, so `== 0` already implies an
+      # onboarded tenant -- no extra "onboarded" guard is needed. max by keeps only
+      # the identifying (namespace,name) labels and collapses any per-replica series.
+      - alert: TEEV2ProxyTenantCollectionStalled
+        expr: max by (namespace, name) (proxy_tenant_collection_up) == 0
+        for: 15m
+        labels:
+          severity: warning
+          service: prometheus-multi-tenant-proxy
+          team: ethos-core
+        annotations:
+          summary: "TEE-V2 proxy tenant collection silently stalled ({{ $labels.namespace }}/{{ $labels.name }})"
+          description: "Per-tenant remote-write collection for MetricAccess {{ $labels.namespace }}/{{ $labels.name }} has reported proxy_tenant_collection_up=0 for 15m. The tenant is onboarded (the metric only exists for tenants with an enabled remote-write job) but no series are being collected or forwarded - a silent stall."
+          runbook: "Workaround: kubectl -n monitoring rollout restart deploy/prometheus-multi-tenant-proxy."
+
+      # FALLBACK / corroborating signal for old images mid-rollout that predate the
+      # proxy_tenant_collection_up metric. `up` is the per-target scrape
+      # health series. This MUST be scoped to THIS proxy's own targets: a bare
+      # `up == 0` (or `up{metrics_path!=""} == 0`) matches essentially every scrape
+      # target in the Prometheus and would fire for unrelated cluster-wide down
+      # targets, mislabeled as this proxy. The proxy is Deployment/Service
+      # `prometheus-multi-tenant-proxy` in namespace `monitoring`, scraped via pod
+      # prometheus.io/scrape annotations; there is no ServiceMonitor in-repo, so the
+      # `job` label is not fixed here -- adjust the selector to match your
+      # ServiceMonitor's/scrape-config's job label. This is coarser (target-down,
+      # not per-tenant stall) and is kept strictly SECONDARY -- prefer
+      # TEEV2ProxyTenantCollectionStalled once every replica emits proxy_tenant_collection_up.
+      - alert: TEEV2ProxyTargetDown
+        expr: up{job=~".*prometheus-multi-tenant-proxy.*"} == 0
+        for: 15m
+        labels:
+          severity: warning
+          service: prometheus-multi-tenant-proxy
+          team: ethos-core
+        annotations:
+          summary: "TEE-V2 proxy scrape target down (fallback for images predating proxy_tenant_collection_up)"
+          description: "A prometheus-multi-tenant-proxy scrape target {{ $labels.namespace }}/{{ $labels.job }} (instance {{ $labels.instance }}) has been down for 15m. Scoped to this proxy's own targets. Corroborating fallback for images that predate proxy_tenant_collection_up; confirm the primary metric before acting."
+          runbook: "Workaround: kubectl -n monitoring rollout restart deploy/prometheus-multi-tenant-proxy."
+
+      # SECONDARY self-heal churn signals (informational). A steadily increasing
+      # restart or per-tenant stall-recreation count means the proxy is papering
+      # over a recurring stall -- worth investigating even if the primary alert is
+      # currently clear.
+      #
+      # Detection is based on pod container RESTARTS from kube-state-metrics, a
+      # persistent, external signal. NOTE: the in-process proxy_self_restart_total
+      # counter is best-effort only -- it is incremented and then the process
+      # immediately os.Exit(1)s, so it lives in-memory and is wiped by the very
+      # restart it counts (resets to 0). increase(proxy_self_restart_total[1h]) > 0
+      # would therefore almost never catch a real self-restart, so it is NOT the
+      # primary signal. Adjust the namespace/pod selector to match this proxy's
+      # Deployment (default: `prometheus-multi-tenant-proxy` in namespace `monitoring`).
+      - alert: TEEV2ProxySelfRestartChurn
+        expr: increase(kube_pod_container_status_restarts_total{namespace="monitoring", pod=~"prometheus-multi-tenant-proxy.*"}[1h]) > 0
+        for: 5m
+        labels:
+          severity: info
+          service: prometheus-multi-tenant-proxy
+          team: ethos-core
+        annotations:
+          summary: "TEE-V2 proxy pod restarted in the last hour (possible self-heal churn)"
+          description: "prometheus-multi-tenant-proxy pod {{ $labels.namespace }}/{{ $labels.pod }} restarted in the last hour (kube_pod_container_status_restarts_total). Recurring last-resort restarts indicate a persistent underlying stall. The in-process proxy_self_restart_total counter is best-effort (wiped by the restart it counts) and not the primary signal."
+
+      - alert: TEEV2ProxyTenantStallRecreationChurn
+        expr: increase(proxy_tenant_stall_recreations_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: info
+          service: prometheus-multi-tenant-proxy
+          team: ethos-core
+        annotations:
+          summary: "TEE-V2 proxy self-healed a stalled tenant job ({{ $labels.namespace }}/{{ $labels.name }})"
+          description: "proxy_tenant_stall_recreations_total for {{ $labels.namespace }}/{{ $labels.name }} increased in the last hour; the self-heal watchdog is recreating a repeatedly-stalling collection job."
