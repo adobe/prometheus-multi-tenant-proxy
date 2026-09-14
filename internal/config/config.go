@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
@@ -108,6 +109,37 @@ type RemoteWriteConfig struct {
 	// MetricAccess CR. Batching is always active; the only tunable is the
 	// chunk size. Unset or zero values default to 5000.
 	BatchSize int `yaml:"batch_size"`
+
+	// StallGracePeriod is how long a per-tenant collection job may go without a
+	// successful collection (>=1 series stored AND remote-write send succeeded)
+	// before it is classified as stalled. A job that has never succeeded is
+	// judged against its creation time. Unset or zero values default to 15m.
+	StallGracePeriod time.Duration `yaml:"stall_grace_period"`
+
+	// RecreateBackoff is the minimum interval between successive in-process
+	// recreations of the same stalled collection job by the self-heal watchdog
+	// A given job is recreated at most once per this window, preventing
+	// a persistently unhealthy target from causing tight recreate churn. Unset or
+	// zero values default to 5m.
+	RecreateBackoff time.Duration `yaml:"recreate_backoff"`
+
+	// PodRestartGracePeriod is how long a per-tenant collection job may remain
+	// stalled AFTER at least one in-process recreate attempt before the
+	// self-heal watchdog escalates to a LAST-RESORT pod restart. Unset
+	// or zero values default to 45m.
+	PodRestartGracePeriod time.Duration `yaml:"pod_restart_grace_period"`
+
+	// PodRestartCooldown is the minimum interval between successive self-heal pod
+	// restarts. At most one self-restart is attempted per this window,
+	// preventing a crash-restart loop. Unset or zero values default to 30m.
+	PodRestartCooldown time.Duration `yaml:"pod_restart_cooldown"`
+
+	// SelfHealPodRestart enables the last-resort self-heal pod restart.
+	// It is OPT-IN and ships DISABLED: a nil value is
+	// treated as false by setDefaults (and by the controller accessor). Set it to
+	// true, or pass --self-heal-pod-restart=true, to enable the escalation.
+	// Stall detection and in-process recreate remain active regardless.
+	SelfHealPodRestart *bool `yaml:"self_heal_pod_restart,omitempty"`
 }
 
 // AuthConfig holds authentication settings (optional)
@@ -226,17 +258,52 @@ func setDefaults(config *Config) error {
 	if config.RemoteWrite.BatchSize <= 0 {
 		config.RemoteWrite.BatchSize = 5000
 	}
-	
+
+	if config.RemoteWrite.StallGracePeriod <= 0 {
+		config.RemoteWrite.StallGracePeriod = 15 * time.Minute
+	}
+
+	if config.RemoteWrite.RecreateBackoff <= 0 {
+		config.RemoteWrite.RecreateBackoff = 5 * time.Minute
+	}
+
+	if config.RemoteWrite.PodRestartGracePeriod <= 0 {
+		config.RemoteWrite.PodRestartGracePeriod = 45 * time.Minute
+	}
+
+	if config.RemoteWrite.PodRestartCooldown <= 0 {
+		config.RemoteWrite.PodRestartCooldown = 30 * time.Minute
+	}
+
+	// SelfHealPodRestart is OPT-IN: the last-resort pod restart ships DISABLED, so
+	// a nil (unset) value defaults to false. Stall detection
+	// and in-process recreate remain on by default.
+	if config.RemoteWrite.SelfHealPodRestart == nil {
+		disabled := false
+		config.RemoteWrite.SelfHealPodRestart = &disabled
+	}
+
 	// Auth defaults
 	if config.Auth != nil && config.Auth.APIKey != nil && config.Auth.APIKey.HeaderName == "" {
 		config.Auth.APIKey.HeaderName = "X-API-Key"
 	}
-	
+
 	return nil
 }
 
 // validate checks the configuration for required fields and consistency
 func validate(config *Config) error {
+	// Non-fatal sanity check: if the pod-restart grace
+	// window is shorter than the stall grace period, the last-resort escalation can
+	// trigger before in-process recreate has had a fair chance to recover
+	// the job. Warn but proceed. Runs after setDefaults, so both values are set.
+	if config.RemoteWrite.PodRestartGracePeriod < config.RemoteWrite.StallGracePeriod {
+		logrus.WithFields(logrus.Fields{
+			"pod_restart_grace_period": config.RemoteWrite.PodRestartGracePeriod,
+			"stall_grace_period":       config.RemoteWrite.StallGracePeriod,
+		}).Warn("remote_write.pod_restart_grace_period is shorter than stall_grace_period; last-resort pod-restart escalation may be premature")
+	}
+
 	// Validate discovery configuration
 	if config.Discovery.RefreshInterval <= 0 {
 		return fmt.Errorf("discovery.refresh_interval must be positive")
